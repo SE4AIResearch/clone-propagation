@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "CloneGuard",
+  "version": "1.0",
+  "description": "Detects code clones in AI-generated suggestions before you accept them",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://github.com/*",
+    "https://gitlab.com/*",
+    "https://replit.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://github.com/*",
+        "https://gitlab.com/*",
+        "https://replit.com/*"
+      ],
+      "js": ["content.js"],
+      "css": ["styles.css"]
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}
