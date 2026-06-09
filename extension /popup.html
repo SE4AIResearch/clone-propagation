@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CloneGuard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      width: 320px;
+      background: #1e1e2e;
+      color: #cdd6f4;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      font-size: 13px;
+    }
+
+    /* ── Header ── */
+    .header {
+      background: #1F3864;
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .header-title {
+      font-size: 16px;
+      font-weight: bold;
+      color: #ffffff;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #40a02b;
+      display: inline-block;
+    }
+    .status-text {
+      font-size: 11px;
+      color: #a6adc8;
+    }
+
+    /* ── Stats section ── */
+    .stats {
+      padding: 14px 16px;
+      border-bottom: 1px solid #313244;
+    }
+    .stats-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #a6adc8;
+      margin-bottom: 10px;
+    }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .stat-card {
+      background: #313244;
+      border-radius: 8px;
+      padding: 10px;
+      text-align: center;
+    }
+    .stat-number {
+      font-size: 24px;
+      font-weight: bold;
+      color: #89b4fa;
+      line-height: 1;
+      margin-bottom: 4px;
+    }
+    .stat-number.red   { color: #e24b4b; }
+    .stat-number.green { color: #40a02b; }
+    .stat-number.amber { color: #f9a825; }
+    .stat-label {
+      font-size: 10px;
+      color: #a6adc8;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+
+    /* ── Index status ── */
+    .index-status {
+      padding: 10px 16px;
+      background: #313244;
+      margin: 12px 16px;
+      border-radius: 8px;
+      border-left: 3px solid #89b4fa;
+    }
+    .index-status-title {
+      font-size: 11px;
+      color: #a6adc8;
+      margin-bottom: 3px;
+    }
+    .index-status-value {
+      font-size: 13px;
+      font-weight: 600;
+      color: #89b4fa;
+    }
+
+    /* ── How it works ── */
+    .how-it-works {
+      padding: 0 16px 12px;
+    }
+    .how-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #a6adc8;
+      margin-bottom: 8px;
+    }
+    .step {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .step-num {
+      background: #1F3864;
+      color: #89b4fa;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: bold;
+      flex-shrink: 0;
+    }
+    .step-text {
+      font-size: 11px;
+      color: #cdd6f4;
+      line-height: 1.5;
+      padding-top: 2px;
+    }
+
+    /* ── Footer ── */
+    .footer {
+      padding: 10px 16px;
+      border-top: 1px solid #313244;
+      text-align: center;
+      font-size: 10px;
+      color: #585b70;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <div class="header">
+    <div class="header-title">
+      <span class="status-dot" id="status-dot"></span>
+      CloneGuard
+    </div>
+    <span class="status-text" id="status-text">Active</span>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats">
+    <div class="stats-title">Session Statistics</div>
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-number red" id="stat-found">0</div>
+        <div class="stat-label">Clones Found</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number amber" id="stat-warnings">0</div>
+        <div class="stat-label">Warnings Shown</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number green" id="stat-prevented">0</div>
+        <div class="stat-label">Prevented</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number" id="stat-dismissed">0</div>
+        <div class="stat-label">Dismissed</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Index Status -->
+  <div class="index-status">
+    <div class="index-status-title">Live Codebase Index</div>
+    <div class="index-status-value" id="index-size">
+      Loading...
+    </div>
+  </div>
+
+  <!-- How it works -->
+  <div class="how-it-works">
+    <div class="how-title">How It Works</div>
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-text">Reads all existing code from the GitHub editor</div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-text">Builds a live index using Karp-Rabin hashing</div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-text">When Copilot suggests code — checks against index</div>
+    </div>
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-text">Shows warning if Type 1 or Type 2 clone detected</div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    CloneGuard — Layer 1 Token Detection
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
