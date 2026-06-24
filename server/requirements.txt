@@ -1,0 +1,6 @@
+flask
+flask-cors
+torch
+transformers
+faiss-cpu
+numpy
