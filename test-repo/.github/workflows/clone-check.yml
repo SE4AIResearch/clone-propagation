@@ -137,12 +137,12 @@ jobs:
                   print(f"Error scanning {filepath}: {e}")
 
           # Combine all results
-          total_clones = sum(r.get("totalClones", 0) for r in all_results)
           all_groups = []
           for r in all_results:
               for g in r.get("cloneGroups", []):
                   g["filepath"] = r.get("filepath", "")
                   all_groups.append(g)
+          total_clones = len(all_groups)
 
           final_result = {
               "cloneGroups": all_groups,
@@ -185,7 +185,7 @@ jobs:
           else:
               severity_icon = "🔴" if total > THRESHOLD else "🟡"
               body = f"## {severity_icon} CloneGuard — {total} Clone Group(s) Detected\n\n"
-              body += f"Scanned {files_scanned} Java file(s) changed in this PR.\n\n"
+              body += f"Scanned {files_scanned} Java file(s) changed in this PR. Semantic similarity is computed using CodeBERT embeddings with cosine similarity via FAISS vector search.\n\n"
               body += "| # | Clone Type | Function A | Function B | Similarity | Layer | Severity |\n"
               body += "|---|-----------|-----------|-----------|------------|-------|----------|\n"
 
