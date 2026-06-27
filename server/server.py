@@ -656,6 +656,8 @@ def scan_file():
     def get_operation_family(code):
         """Detect what a function computes — used to prevent false positives."""
         ops = set()
+        if re.search(r'\bfib\b|fibonacci|fib_', code, re.IGNORECASE):
+            ops.add('fibonacci')
         if re.search(r'\+=|=\s*\w+\s*\+\s*\w+|\bsum\b|\btotal\b', code, re.IGNORECASE):
             ops.add('sum')
         if re.search(r'%\s*\w+|Math\.sqrt|Math\.pow|\bprime\b', code, re.IGNORECASE):
@@ -678,9 +680,13 @@ def scan_file():
         if ret1 != ret2:
             print(f"[CloneGuard] Return type mismatch: {ret1} vs {ret2} — skipping")
             return False
-        # If both have known ops and they don't overlap — not clones
         ops1 = get_operation_family(code1)
         ops2 = get_operation_family(code2)
+        # Fibonacci vs non-fibonacci is always incompatible
+        if ('fibonacci' in ops1) != ('fibonacci' in ops2):
+            print(f"[CloneGuard] Operation mismatch: {ops1} vs {ops2} — skipping")
+            return False
+        # If both have known ops and they don't overlap — not clones
         if ops1 and ops2 and ops1.isdisjoint(ops2):
             print(f"[CloneGuard] Operation mismatch: {ops1} vs {ops2} — skipping")
             return False
@@ -760,7 +766,7 @@ def scan_file():
 
             fn_j = scan_functions[j]
 
-            if fn_j["name"] in layer1_names:
+            if fn_j["name"] in layer1_names or fn_j["name"] in {g["functionA"] for g in clone_groups} | {g["functionB"] for g in clone_groups}:
                 continue
 
             pair_key = tuple(sorted([fn_i["name"], fn_j["name"]]))
