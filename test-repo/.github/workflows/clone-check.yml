@@ -1,129 +1,103 @@
-# ── CloneGuard GitHub Actions Workflow ───────────────────────────────────────
-# Triggers on every PR open or update.
-# Scans changed Java files for clones and posts a review comment.
-
-name: CloneGuard — Clone Detection
+name: CloneGuard — PR Clone Check
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    paths:
-      - '**.java'
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
-  clone-detection:
-    name: Scan for Code Clones
+  clone-check:
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1: Checkout the PR code
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
-      # Step 2: Get list of changed Java files
-      - name: Get changed Java files
-        id: changed_files
-        run: |
-          echo "Getting changed Java files..."
-          git diff --name-only origin/${{ github.base_ref }}...HEAD -- '*.java' > changed_files.txt
-          echo "Changed Java files:"
-          cat changed_files.txt
-          echo "count=$(wc -l < changed_files.txt)" >> $GITHUB_OUTPUT
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
 
-      # Step 3: Extract functions from changed files and send to CloneGuard
+      - name: Get changed Java files
+        run: |
+          git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '\.java$' > changed_files.txt || true
+          echo "Changed Java files:"
+          cat changed_files.txt || echo "(none)"
+
       - name: Run CloneGuard scan
-        id: scan
         env:
-          CLONEGUARD_URL: ${{ secrets.CLONEGUARD_SERVER_URL }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLONEGUARD_SERVER_URL: ${{ secrets.CLONEGUARD_SERVER_URL }}
         run: |
           python3 << 'PYTHON'
-          import os, re, json, urllib.request, urllib.error
+          import json, os, urllib.request
 
-          CLONEGUARD_URL = os.environ.get("CLONEGUARD_URL", "http://localhost:8765")
-          changed_files_path = "changed_files.txt"
+          server_url = os.environ.get("CLONEGUARD_SERVER_URL", "").rstrip("/")
 
-          # Read changed Java files
-          with open(changed_files_path) as f:
-              changed_files = [line.strip() for line in f if line.strip().endswith(".java")]
+          changed_files = []
+          try:
+              with open("changed_files.txt") as f:
+                  changed_files = [l.strip() for l in f if l.strip()]
+          except FileNotFoundError:
+              pass
 
           if not changed_files:
-              print("No Java files changed. Skipping scan.")
+              result = {"cloneGroups": [], "totalClones": 0, "filesScanned": 0}
               with open("scan_result.json", "w") as f:
-                  json.dump({"cloneGroups": [], "totalClones": 0, "skipped": True}, f)
+                  json.dump(result, f, indent=2)
+              print("No Java files changed.")
               exit(0)
-
-          print(f"Scanning {len(changed_files)} Java file(s)...")
-
-          def extract_functions_from_file(filepath):
-              """Extract Java methods from a file using regex."""
-              functions = []
-              try:
-                  with open(filepath, 'r', encoding='utf-8') as f:
-                      content = f.read()
-              except:
-                  return functions
-
-              pattern = re.compile(
-                  r'(?:(?:public|private|protected|static|final|synchronized)\s+)+'
-                  r'(?:void|int|long|double|float|boolean|char|byte|short|String|[\w<>\[\]]+)\s+'
-                  r'(\w+)\s*\([^)]*\)\s*(?:throws\s+[\w,\s]+)?\s*\{',
-                  re.MULTILINE
-              )
-
-              for match in pattern.finditer(content):
-                  name = match.group(1)
-                  if name in ('if', 'for', 'while', 'switch', 'try', 'catch'):
-                      continue
-
-                  # Extract the full method body
-                  start = match.start()
-                  brace_start = content.find('{', match.end() - 1)
-                  if brace_start == -1:
-                      continue
-
-                  depth = 0
-                  end = brace_start
-                  for i in range(brace_start, len(content)):
-                      if content[i] == '{':
-                          depth += 1
-                      elif content[i] == '}':
-                          depth -= 1
-                          if depth == 0:
-                              end = i + 1
-                              break
-
-                  method_code = content[start:end].strip()
-                  if len(method_code) > 20:
-                      functions.append({"name": name, "code": method_code})
-
-              return functions
 
           all_results = []
 
           for filepath in changed_files:
               if not os.path.exists(filepath):
-                  print(f"File not found: {filepath}")
+                  print(f"Skipping {filepath} — file not found")
                   continue
-
-              functions = extract_functions_from_file(filepath)
-              print(f"{filepath}: found {len(functions)} function(s)")
-
-              if len(functions) < 2:
-                  print(f"Skipping {filepath} — need at least 2 functions")
-                  continue
-
-              # Send to CloneGuard /scan endpoint
-              payload = json.dumps({
-                  "functions": functions,
-                  "filename": os.path.basename(filepath)
-              }).encode('utf-8')
-
               try:
+                  with open(filepath, "r", encoding="utf-8") as f:
+                      code = f.read()
+
+                  # Extract functions from file to match /scan endpoint format
+                  import re
+                  pattern = re.compile(
+                      r'(?:public|private|protected|static|final|\s)+'
+                      r'(?:void|int|long|double|float|boolean|String|\w+)\s+'
+                      r'(\w+)\s*\([^)]*\)\s*\{',
+                      re.MULTILINE
+                  )
+                  functions = []
+                  for m in pattern.finditer(code):
+                      name = m.group(1)
+                      start = m.start()
+                      # Extract full method body by counting braces
+                      depth = 0
+                      end = start
+                      for k, ch in enumerate(code[start:], start):
+                          if ch == '{':
+                              depth += 1
+                          elif ch == '}':
+                              depth -= 1
+                              if depth == 0:
+                                  end = k + 1
+                                  break
+                      functions.append({"name": name, "code": code[start:end]})
+
+                  if len(functions) < 2:
+                      print(f"{filepath}: fewer than 2 functions — skipping")
+                      continue
+
+                  payload = json.dumps({
+                      "functions": functions,
+                      "filename": filepath
+                  }).encode("utf-8")
+
                   req = urllib.request.Request(
-                      f"{CLONEGUARD_URL}/scan",
+                      f"{server_url}/scan",
                       data=payload,
                       headers={"Content-Type": "application/json"},
                       method="POST"
@@ -132,17 +106,19 @@ jobs:
                       result = json.loads(resp.read().decode())
                       result["filepath"] = filepath
                       all_results.append(result)
-                      print(f"{filepath}: {result['totalClones']} clone group(s) found")
+                      print(f"{filepath}: {result.get('totalClones', 0)} clone group(s) found")
               except Exception as e:
                   print(f"Error scanning {filepath}: {e}")
 
-          # Combine all results
+          # ── BUG 1 FIX: build list first, count after ──────────────────────
           all_groups = []
           for r in all_results:
               for g in r.get("cloneGroups", []):
                   g["filepath"] = r.get("filepath", "")
                   all_groups.append(g)
-          total_clones = len(all_groups)
+
+          total_clones = len(all_groups)  # count from the list, never trust the field
+          # ─────────────────────────────────────────────────────────────────────
 
           final_result = {
               "cloneGroups": all_groups,
@@ -153,10 +129,9 @@ jobs:
           with open("scan_result.json", "w") as f:
               json.dump(final_result, f, indent=2)
 
-          print(f"\nTotal clones found: {total_clones}")
+          print(f"\nTotal clone groups found: {total_clones}")
           PYTHON
 
-      # Step 4: Post PR review comment with clone report
       - name: Post clone report as PR comment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -166,47 +141,89 @@ jobs:
           python3 << 'PYTHON'
           import os, json, urllib.request
 
-          GH_TOKEN = os.environ["GH_TOKEN"]
+          GH_TOKEN  = os.environ["GH_TOKEN"]
           PR_NUMBER = os.environ["PR_NUMBER"]
-          REPO = os.environ["REPO"]
-          THRESHOLD = 3  # Block merge if more than this many clones found
+          REPO      = os.environ["REPO"]
+          THRESHOLD = 3
 
           with open("scan_result.json") as f:
               result = json.load(f)
 
-          total = result.get("totalClones", 0)
-          groups = result.get("cloneGroups", [])
+          groups       = result.get("cloneGroups", [])
           files_scanned = result.get("filesScanned", 0)
 
-          # Build comment body
+          # ── BUG 1 FIX: always recount from the list ───────────────────────
+          total = len(groups)
+          # ─────────────────────────────────────────────────────────────────────
+
           if total == 0:
-              body = "## ✅ CloneGuard — No Clones Detected\n\n"
+              body  = "## ✅ CloneGuard — No Clones Detected\n\n"
+              # ── BUG 3 FIX: mode label ─────────────────────────────────────
+              body += "> ℹ️ **PR Review Mode** — CloneGuard runs here as a team-level "
+              body += "gate before merge. For real-time in-editor feedback, use the "
+              body += "CloneGuard IntelliJ plugin (Scenarios 1 & 2).\n\n"
+              # ──────────────────────────────────────────────────────────────
               body += f"Scanned {files_scanned} Java file(s). Your code is clean!\n"
           else:
               severity_icon = "🔴" if total > THRESHOLD else "🟡"
-              body = f"## {severity_icon} CloneGuard — {total} Clone Group(s) Detected\n\n"
-              body += f"Scanned {files_scanned} Java file(s) changed in this PR. Semantic similarity is computed using CodeBERT embeddings with cosine similarity via FAISS vector search.\n\n"
+              body  = f"## {severity_icon} CloneGuard — {total} Clone Group(s) Detected\n\n"
+
+              # ── BUG 3 FIX: mode label ─────────────────────────────────────
+              body += "> ℹ️ **PR Review Mode** — CloneGuard runs here as a team-level "
+              body += "gate before merge. For real-time in-editor feedback, use the "
+              body += "CloneGuard IntelliJ plugin (Scenarios 1 & 2).\n\n"
+              # ──────────────────────────────────────────────────────────────
+
+              body += f"Scanned **{files_scanned}** Java file(s) changed in this PR.\n\n"
+
+              # ── BUG 4 FIX: split detection explanation into its own block ──
+              body += "**Detection method:** Type 1 & 2 clones are caught by Layer 1 "
+              body += "(exact and normalized identifier hashing — no server needed). "
+              body += "Type 3 & 4 clones are caught by Layer 2 using CodeBERT neural "
+              body += "embeddings compared via cosine similarity through a FAISS vector "
+              body += "index — not keyword matching or heuristics.\n\n"
+              # ──────────────────────────────────────────────────────────────
+
+              # ── BUG 1 FIX: table row count = len(groups), always ──────────
               body += "| # | Clone Type | Function A | Function B | Similarity | Layer | Severity |\n"
               body += "|---|-----------|-----------|-----------|------------|-------|----------|\n"
-
               for i, g in enumerate(groups, 1):
-                  body += f"| {i} | {g['cloneType']} | `{g['functionA']}()` | `{g['functionB']}()` | {g['similarity']} | {g['detectionLayer']} | {g['severity']} |\n"
+                  body += (f"| {i} | {g['cloneType']} "
+                           f"| `{g['functionA']}()` "
+                           f"| `{g['functionB']}()` "
+                           f"| {g['similarity']} "
+                           f"| {g['detectionLayer']} "
+                           f"| {g['severity']} |\n")
+              # ──────────────────────────────────────────────────────────────
 
-              body += "\n### Recommendations\n"
+              body += "\n### 💡 Refactoring Suggestions\n\n"
               for i, g in enumerate(groups, 1):
-                  body += f"**{i}. {g['functionA']}() ↔ {g['functionB']}():** {g['recommendation']}\n\n"
+                  body += f"**{i}. `{g['functionA']}()` ↔ `{g['functionB']}()`**\n"
+                  body += f"{g['recommendation']}\n\n"
+
+              # ── BUG 2 FIX: show developer action steps per group ──────────
+              body += "<details>\n<summary>How to refactor these in your IDE</summary>\n\n"
+              body += "1. Open the file in IntelliJ IDEA with the CloneGuard plugin installed.\n"
+              body += "2. Run **Tools → CloneGuard → Scan Current File** (or `Ctrl+Shift+G`).\n"
+              body += "3. The clone groups above will appear in the CloneGuard panel.\n"
+              body += "4. Click **Refactor →** next to each group — the plugin will confirm\n"
+              body += "   and then replace the duplicate method body with a delegation call\n"
+              body += "   to the canonical function.\n"
+              body += "5. Re-run the scan to confirm zero clones before pushing.\n\n"
+              body += "</details>\n\n"
+              # ──────────────────────────────────────────────────────────────
 
               if total > THRESHOLD:
-                  body += f"\n---\n⛔ **Merge blocked** — {total} clones exceed the threshold of {THRESHOLD}. "
-                  body += "Please refactor before merging.\n"
+                  body += f"\n---\n⛔ **Merge blocked** — {total} clone group(s) exceed "
+                  body += f"the threshold of {THRESHOLD}. Please refactor before merging.\n"
               else:
-                  body += f"\n---\n⚠️ Clones detected but below threshold ({total}/{THRESHOLD}). Consider refactoring.\n"
+                  body += f"\n---\n⚠️ Clone count ({total}/{THRESHOLD}) is below the merge "
+                  body += "threshold. Refactoring is strongly recommended.\n"
 
-          body += "\n*Powered by CloneGuard — AI-Assisted Code Clone Detection*"
+          body += "\n*Powered by [CloneGuard](https://github.com/SE4AIResearch/clone-propagation) — AI-Assisted Code Clone Detection*"
 
-          # Post comment via GitHub API
           comment_url = f"https://api.github.com/repos/{REPO}/issues/{PR_NUMBER}/comments"
-          payload = json.dumps({"body": body}).encode('utf-8')
+          payload = json.dumps({"body": body}).encode("utf-8")
           req = urllib.request.Request(
               comment_url,
               data=payload,
@@ -220,7 +237,6 @@ jobs:
           with urllib.request.urlopen(req) as resp:
               print(f"Comment posted: {resp.status}")
 
-          # Set exit code to fail if too many clones
           if total > THRESHOLD:
               print(f"FAILING: {total} clones exceed threshold of {THRESHOLD}")
               exit(1)
