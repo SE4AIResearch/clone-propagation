@@ -1,0 +1,229 @@
+# ── CloneGuard GitHub Actions Workflow ───────────────────────────────────────
+# Triggers on every PR open or update.
+# Scans changed Java files for clones and posts a review comment.
+
+name: CloneGuard — Clone Detection
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '**.java'
+
+jobs:
+  clone-detection:
+    name: Scan for Code Clones
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checkout the PR code
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Step 2: Get list of changed Java files
+      - name: Get changed Java files
+        id: changed_files
+        run: |
+          echo "Getting changed Java files..."
+          git diff --name-only origin/${{ github.base_ref }}...HEAD -- '*.java' > changed_files.txt
+          echo "Changed Java files:"
+          cat changed_files.txt
+          echo "count=$(wc -l < changed_files.txt)" >> $GITHUB_OUTPUT
+
+      # Step 3: Extract functions from changed files and send to CloneGuard
+      - name: Run CloneGuard scan
+        id: scan
+        env:
+          CLONEGUARD_URL: ${{ secrets.CLONEGUARD_SERVER_URL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 << 'PYTHON'
+          import os, re, json, urllib.request, urllib.error
+
+          CLONEGUARD_URL = os.environ.get("CLONEGUARD_URL", "http://localhost:8765")
+          changed_files_path = "changed_files.txt"
+
+          # Read changed Java files
+          with open(changed_files_path) as f:
+              changed_files = [line.strip() for line in f if line.strip().endswith(".java")]
+
+          if not changed_files:
+              print("No Java files changed. Skipping scan.")
+              with open("scan_result.json", "w") as f:
+                  json.dump({"cloneGroups": [], "totalClones": 0, "skipped": True}, f)
+              exit(0)
+
+          print(f"Scanning {len(changed_files)} Java file(s)...")
+
+          def extract_functions_from_file(filepath):
+              """Extract Java methods from a file using regex."""
+              functions = []
+              try:
+                  with open(filepath, 'r', encoding='utf-8') as f:
+                      content = f.read()
+              except:
+                  return functions
+
+              pattern = re.compile(
+                  r'(?:(?:public|private|protected|static|final|synchronized)\s+)+'
+                  r'(?:void|int|long|double|float|boolean|char|byte|short|String|[\w<>\[\]]+)\s+'
+                  r'(\w+)\s*\([^)]*\)\s*(?:throws\s+[\w,\s]+)?\s*\{',
+                  re.MULTILINE
+              )
+
+              for match in pattern.finditer(content):
+                  name = match.group(1)
+                  if name in ('if', 'for', 'while', 'switch', 'try', 'catch'):
+                      continue
+
+                  # Extract the full method body
+                  start = match.start()
+                  brace_start = content.find('{', match.end() - 1)
+                  if brace_start == -1:
+                      continue
+
+                  depth = 0
+                  end = brace_start
+                  for i in range(brace_start, len(content)):
+                      if content[i] == '{':
+                          depth += 1
+                      elif content[i] == '}':
+                          depth -= 1
+                          if depth == 0:
+                              end = i + 1
+                              break
+
+                  method_code = content[start:end].strip()
+                  if len(method_code) > 20:
+                      functions.append({"name": name, "code": method_code})
+
+              return functions
+
+          all_results = []
+
+          for filepath in changed_files:
+              if not os.path.exists(filepath):
+                  print(f"File not found: {filepath}")
+                  continue
+
+              functions = extract_functions_from_file(filepath)
+              print(f"{filepath}: found {len(functions)} function(s)")
+
+              if len(functions) < 2:
+                  print(f"Skipping {filepath} — need at least 2 functions")
+                  continue
+
+              # Send to CloneGuard /scan endpoint
+              payload = json.dumps({
+                  "functions": functions,
+                  "filename": os.path.basename(filepath)
+              }).encode('utf-8')
+
+              try:
+                  req = urllib.request.Request(
+                      f"{CLONEGUARD_URL}/scan",
+                      data=payload,
+                      headers={"Content-Type": "application/json"},
+                      method="POST"
+                  )
+                  with urllib.request.urlopen(req, timeout=60) as resp:
+                      result = json.loads(resp.read().decode())
+                      result["filepath"] = filepath
+                      all_results.append(result)
+                      print(f"{filepath}: {result['totalClones']} clone group(s) found")
+              except Exception as e:
+                  print(f"Error scanning {filepath}: {e}")
+
+          # Combine all results
+          total_clones = sum(r.get("totalClones", 0) for r in all_results)
+          all_groups = []
+          for r in all_results:
+              for g in r.get("cloneGroups", []):
+                  g["filepath"] = r.get("filepath", "")
+                  all_groups.append(g)
+
+          final_result = {
+              "cloneGroups": all_groups,
+              "totalClones": total_clones,
+              "filesScanned": len(changed_files)
+          }
+
+          with open("scan_result.json", "w") as f:
+              json.dump(final_result, f, indent=2)
+
+          print(f"\nTotal clones found: {total_clones}")
+          PYTHON
+
+      # Step 4: Post PR review comment with clone report
+      - name: Post clone report as PR comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 << 'PYTHON'
+          import os, json, urllib.request
+
+          GH_TOKEN = os.environ["GH_TOKEN"]
+          PR_NUMBER = os.environ["PR_NUMBER"]
+          REPO = os.environ["REPO"]
+          THRESHOLD = 3  # Block merge if more than this many clones found
+
+          with open("scan_result.json") as f:
+              result = json.load(f)
+
+          total = result.get("totalClones", 0)
+          groups = result.get("cloneGroups", [])
+          files_scanned = result.get("filesScanned", 0)
+
+          # Build comment body
+          if total == 0:
+              body = "## ✅ CloneGuard — No Clones Detected\n\n"
+              body += f"Scanned {files_scanned} Java file(s). Your code is clean!\n"
+          else:
+              severity_icon = "🔴" if total > THRESHOLD else "🟡"
+              body = f"## {severity_icon} CloneGuard — {total} Clone Group(s) Detected\n\n"
+              body += f"Scanned {files_scanned} Java file(s) changed in this PR.\n\n"
+              body += "| # | Clone Type | Function A | Function B | Similarity | Layer | Severity |\n"
+              body += "|---|-----------|-----------|-----------|------------|-------|----------|\n"
+
+              for i, g in enumerate(groups, 1):
+                  body += f"| {i} | {g['cloneType']} | `{g['functionA']}()` | `{g['functionB']}()` | {g['similarity']} | {g['detectionLayer']} | {g['severity']} |\n"
+
+              body += "\n### Recommendations\n"
+              for i, g in enumerate(groups, 1):
+                  body += f"**{i}. {g['functionA']}() ↔ {g['functionB']}():** {g['recommendation']}\n\n"
+
+              if total > THRESHOLD:
+                  body += f"\n---\n⛔ **Merge blocked** — {total} clones exceed the threshold of {THRESHOLD}. "
+                  body += "Please refactor before merging.\n"
+              else:
+                  body += f"\n---\n⚠️ Clones detected but below threshold ({total}/{THRESHOLD}). Consider refactoring.\n"
+
+          body += "\n*Powered by CloneGuard — AI-Assisted Code Clone Detection*"
+
+          # Post comment via GitHub API
+          comment_url = f"https://api.github.com/repos/{REPO}/issues/{PR_NUMBER}/comments"
+          payload = json.dumps({"body": body}).encode('utf-8')
+          req = urllib.request.Request(
+              comment_url,
+              data=payload,
+              headers={
+                  "Authorization": f"Bearer {GH_TOKEN}",
+                  "Accept": "application/vnd.github+json",
+                  "Content-Type": "application/json"
+              },
+              method="POST"
+          )
+          with urllib.request.urlopen(req) as resp:
+              print(f"Comment posted: {resp.status}")
+
+          # Set exit code to fail if too many clones
+          if total > THRESHOLD:
+              print(f"FAILING: {total} clones exceed threshold of {THRESHOLD}")
+              exit(1)
+          else:
+              print(f"PASSING: {total} clones within threshold of {THRESHOLD}")
+          PYTHON
