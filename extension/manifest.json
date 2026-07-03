@@ -1,0 +1,54 @@
+{
+  "manifest_version": 3,
+  "name": "CloneGuard",
+  "version": "2.1.2",
+  "description": "Detects Type 1, 2, 3 and 4 code clones in AI-assisted coding in real time — before the developer accepts the suggestion.",
+
+  "permissions": [
+    "storage",
+    "scripting",
+    "activeTab",
+    "alarms"
+  ],
+
+  "host_permissions": [
+    "https://github.com/*",
+    "https://github.dev/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "https://github.com/*",
+        "https://github.dev/*",
+        "http://127.0.0.1:8765/*",
+        "http://localhost:8765/*"
+      ],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "CloneGuard",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

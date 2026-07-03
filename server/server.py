@@ -1099,6 +1099,27 @@ def scan_file():
     clone_groups = []
     seen_pairs = set()  # prevents A<->B and B<->A duplicates
 
+    def is_delegation_wrapper(code):
+        """
+        Returns True if this method's entire body is a single delegation call —
+        i.e. it was produced by CloneGuard's Method Delegation refactoring.
+        These methods are intentional wrappers, not clones, and should never
+        be flagged as Type 2 matches against each other.
+
+        Patterns matched:
+          { return someMethod(arg); }
+          { someMethod(arg); }
+          { return someMethod(a, b); }
+        """
+        body = extract_body_local(code).strip()
+        # Remove braces and whitespace
+        inner = body.strip('{}').strip()
+        # Match: optional 'return', a method call, semicolon — and nothing else
+        delegation_pattern = re.compile(
+            r'^(?:return\s+)?\w+\s*\([^)]*\)\s*;$'
+        )
+        return bool(delegation_pattern.match(inner))
+
     # ── Layer 1: Type 1 and Type 2 — all pairs ───────────────────────────────
     for i, fn_i in enumerate(scan_functions):
         body_i = normalize_body(extract_body_local(fn_i["snippet"]))
@@ -1117,6 +1138,11 @@ def scan_file():
 
             # Type 1: exact body match
             if body_i == body_j:
+                # Skip if both are delegation wrappers — intentional pattern, not a clone
+                if is_delegation_wrapper(fn_i["snippet"]) and is_delegation_wrapper(fn_j["snippet"]):
+                    print(f"[CloneGuard] /scan skipping delegation wrappers: {fn_i['name']} <-> {fn_j['name']}")
+                    seen_pairs.add(pair_key)
+                    continue
                 clone_groups.append({
                     "cloneType": "Type 1 — Exact Clone",
                     "similarity": "100%",
@@ -1133,6 +1159,12 @@ def scan_file():
 
             # Type 2 vs Type 3: normalized structure match
             if stripped_i == stripped_j and stripped_i != "":
+                # Skip if BOTH methods are delegation wrappers —
+                # they were intentionally refactored to delegate and are not clones
+                if is_delegation_wrapper(fn_i["snippet"]) and is_delegation_wrapper(fn_j["snippet"]):
+                    print(f"[CloneGuard] /scan skipping delegation wrappers: {fn_i['name']} <-> {fn_j['name']}")
+                    seen_pairs.add(pair_key)
+                    continue
                 stmts_i = len(re.findall(r';', extract_body_local(fn_i["snippet"])))
                 stmts_j = len(re.findall(r';', extract_body_local(fn_j["snippet"])))
                 if stmts_i == stmts_j:

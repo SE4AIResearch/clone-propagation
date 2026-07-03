@@ -1,0 +1,14 @@
+# Gradle / IntelliJ plugin build output
+plugin/build/
+plugin/.gradle/
+plugin/.idea/
+plugin/out/
+
+# Python
+server/__pycache__/
+server/venv/
+server/.idea/
+
+# macOS
+.DS_Store
+**/.DS_Store
