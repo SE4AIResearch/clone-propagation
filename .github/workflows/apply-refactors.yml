@@ -1,0 +1,242 @@
+# ── CloneGuard — Apply Selected Refactors ────────────────────────────────────
+# Triggered when someone comments "/refactor" on a PR. Reads the most recent
+# CloneGuard checklist comment, applies every CHECKED item as one commit --
+# but re-verifies each one against the CURRENT file content first, so two
+# checked items that turn out to touch the same function don't both get
+# applied (only the first is; the rest are skipped with a clear reason).
+#
+# Deliberately commits directly rather than posting GitHub suggestion
+# comments -- this means it isn't limited to lines that are part of the
+# PR's diff (unlike the old approach), since a direct file edit doesn't
+# need a diff hunk to anchor to.
+
+name: CloneGuard — Apply Selected Refactors
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  apply-refactors:
+    if: github.event.issue.pull_request && contains(github.event.comment.body, '/refactor')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Get PR branch details
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 << 'PYTHON'
+          import os, json, urllib.request
+
+          GH_TOKEN = os.environ["GH_TOKEN"]
+          REPO = "${{ github.repository }}"
+          PR_NUMBER = "${{ github.event.issue.number }}"
+
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/{REPO}/pulls/{PR_NUMBER}",
+              headers={"Authorization": f"Bearer {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+          )
+          with urllib.request.urlopen(req) as resp:
+              pr = json.loads(resp.read().decode())
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"head_ref={pr['head']['ref']}\n")
+          PYTHON
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.head_ref }}
+          fetch-depth: 0
+
+      - name: Apply selected refactors
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLONEGUARD_URL: ${{ secrets.CLONEGUARD_SERVER_URL }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 << 'PYTHON'
+          import os, re, json, subprocess, urllib.request, urllib.error
+
+          GH_TOKEN = os.environ["GH_TOKEN"]
+          CLONEGUARD_URL = os.environ.get("CLONEGUARD_URL", "http://localhost:8765")
+          PR_NUMBER = os.environ["PR_NUMBER"]
+          REPO = os.environ["REPO"]
+
+          def gh_request(url, method="GET", body=None):
+              data = json.dumps(body).encode() if body is not None else None
+              req = urllib.request.Request(url, data=data, method=method, headers={
+                  "Authorization": f"Bearer {GH_TOKEN}",
+                  "Accept": "application/vnd.github+json",
+                  "Content-Type": "application/json",
+              })
+              with urllib.request.urlopen(req) as resp:
+                  return json.loads(resp.read().decode())
+
+          # ── Find the most recent CloneGuard checklist comment ──────────────
+          comments = gh_request(f"https://api.github.com/repos/{REPO}/issues/{PR_NUMBER}/comments?per_page=100")
+          checklist_comments = [
+              c for c in comments
+              if c.get("user", {}).get("login", "").startswith("github-actions")
+              and "Select clones to refactor" in c.get("body", "")
+          ]
+          if not checklist_comments:
+              print("No CloneGuard checklist comment found on this PR -- nothing to apply.")
+              exit(0)
+          checklist = checklist_comments[-1]["body"]
+
+          # ── Parse CHECKED items only ────────────────────────────────────────
+          # "- [x] **1.** `src/Main.java`: `multiplyAll()` ↔ `multiplyAllExact()` — Type 1, Extract Method"
+          pattern = re.compile(
+              r'-\s*\[[xX]\]\s*\*\*(\d+)\.\*\*\s*`([^`]+)`:\s*`(\w+)\(\)`\s*.\s*`(\w+)\(\)`'
+          )
+          selected = pattern.findall(checklist)
+          if not selected:
+              gh_request(
+                  f"https://api.github.com/repos/{REPO}/issues/{PR_NUMBER}/comments",
+                  method="POST",
+                  body={"body": "**CloneGuard** — no checked items found in the most recent checklist. "
+                                "Check at least one box before commenting `/refactor`."}
+              )
+              print("No checked items.")
+              exit(0)
+
+          print(f"Selected {len(selected)} group(s): {selected}")
+
+          # ── Regex function extractor (same approach as the main scan step) ─
+          FUNC_PATTERN = re.compile(
+              r'(?:(?:public|private|protected|static|final|synchronized)\s+)+'
+              r'(?:void|int|long|double|float|boolean|char|byte|short|String|[\w<>\[\]]+)\s+'
+              r'(\w+)\s*\([^)]*\)\s*(?:throws\s+[\w,\s]+)?\s*\{',
+              re.MULTILINE
+          )
+
+          def extract_functions(content):
+              functions = []
+              for match in FUNC_PATTERN.finditer(content):
+                  name = match.group(1)
+                  if name in ('if', 'for', 'while', 'switch', 'try', 'catch'):
+                      continue
+                  start = match.start()
+                  brace_start = content.find('{', match.end() - 1)
+                  if brace_start == -1:
+                      continue
+                  depth, end = 0, brace_start
+                  for i in range(brace_start, len(content)):
+                      if content[i] == '{':
+                          depth += 1
+                      elif content[i] == '}':
+                          depth -= 1
+                          if depth == 0:
+                              end = i + 1
+                              break
+                  code = content[start:end].strip()
+                  if len(code) > 20:
+                      functions.append({"name": name, "code": code, "start": start, "end": end})
+              return functions
+
+          # ── Apply, grouped by file so each file is read/written once ───────
+          by_file = {}
+          for idx, filepath, name_a, name_b in selected:
+              by_file.setdefault(filepath, []).append((idx, name_a, name_b))
+
+          claimed = set()  # functions already spoken for by an earlier group THIS run
+          applied, skipped = [], []
+
+          for filepath, file_groups in by_file.items():
+              if not os.path.exists(filepath):
+                  for idx, name_a, name_b in file_groups:
+                      skipped.append((idx, name_a, name_b, f"{filepath} not found"))
+                  continue
+
+              with open(filepath, 'r', encoding='utf-8') as f:
+                  content = f.read()
+              by_name = {fn["name"]: fn for fn in extract_functions(content)}
+              edits = []  # (start, end, replacement) -- applied back-to-front so offsets stay valid
+
+              for idx, name_a, name_b in file_groups:
+                  if name_a in claimed or name_b in claimed:
+                      skipped.append((idx, name_a, name_b,
+                                       "conflicts with another selected item sharing a function -- "
+                                       "apply this one separately after the first lands"))
+                      continue
+
+                  fn_a, fn_b = by_name.get(name_a), by_name.get(name_b)
+                  if not fn_a or not fn_b:
+                      skipped.append((idx, name_a, name_b, "could not locate current code for one or both methods"))
+                      continue
+
+                  try:
+                      payload = json.dumps({
+                          "nameA": name_a, "codeA": fn_a["code"],
+                          "nameB": name_b, "codeB": fn_b["code"]
+                      }).encode()
+                      req = urllib.request.Request(
+                          f"{CLONEGUARD_URL}/suggest", data=payload,
+                          headers={"Content-Type": "application/json"}, method="POST"
+                      )
+                      with urllib.request.urlopen(req, timeout=30) as resp:
+                          suggestion = json.loads(resp.read().decode())
+                  except Exception as e:
+                      skipped.append((idx, name_a, name_b, f"suggestion request failed: {e}"))
+                      continue
+
+                  if not suggestion.get("available"):
+                      skipped.append((idx, name_a, name_b, suggestion.get("reason", "no longer applicable")))
+                      continue
+
+                  if suggestion.get("technique") == "delegation":
+                      edits.append((fn_b["start"], fn_b["end"], suggestion["newDuplicateBody"]))
+                  else:
+                      edits.append((fn_a["start"], fn_a["end"], suggestion["newCanonicalBody"]))
+                      edits.append((fn_b["start"], fn_b["end"],
+                                    suggestion["newDuplicateBody"] + "\n\n" + suggestion["helperCode"]))
+
+                  claimed.add(name_a)
+                  claimed.add(name_b)
+                  applied.append((idx, name_a, name_b, suggestion.get("technique", "extract")))
+
+              if edits:
+                  edits.sort(key=lambda e: e[0], reverse=True)
+                  new_content = content
+                  for start, end, replacement in edits:
+                      new_content = new_content[:start] + replacement + new_content[end:]
+                  with open(filepath, 'w', encoding='utf-8') as f:
+                      f.write(new_content)
+
+          if not applied:
+              body = "**CloneGuard** — none of the selected clones could be applied:\n\n"
+              for idx, a, b, reason in skipped:
+                  body += f"- ⏭️ #{idx} `{a}()` ↔ `{b}()`: {reason}\n"
+              gh_request(f"https://api.github.com/repos/{REPO}/issues/{PR_NUMBER}/comments",
+                         method="POST", body={"body": body})
+              print("Nothing applied.")
+              exit(0)
+
+          subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
+          subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
+          subprocess.run(["git", "add", "-A"], check=True)
+          applied_ids = ", ".join(f"#{idx}" for idx, *_ in applied)
+          subprocess.run(["git", "commit", "-m", f"Apply selected refactors ({applied_ids}) via /refactor"], check=True)
+          subprocess.run(["git", "push"], check=True)
+
+          body = f"**CloneGuard** — applied {len(applied)} refactor(s):\n\n"
+          for idx, a, b, tech in applied:
+              label = "Method Delegation" if tech == "delegation" else "Extract Method"
+              body += f"- ✅ #{idx} `{a}()` ↔ `{b}()` ({label})\n"
+          if skipped:
+              body += "\nSkipped:\n"
+              for idx, a, b, reason in skipped:
+                  body += f"- ⏭️ #{idx} `{a}()` ↔ `{b}()`: {reason}\n"
+          body += "\nA fresh scan will run automatically on this push -- check back for an updated checklist."
+          gh_request(f"https://api.github.com/repos/{REPO}/issues/{PR_NUMBER}/comments",
+                     method="POST", body={"body": body})
+          print(f"Applied {len(applied)}, skipped {len(skipped)}.")
+          PYTHON
