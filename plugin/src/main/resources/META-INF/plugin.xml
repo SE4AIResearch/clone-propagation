@@ -28,6 +28,21 @@
             implementation="com.cloneguard.listeners.InlineSuggestionListener"/>
 
         <!-- ═══════════════════════════════════════════════
+             SCENARIO 1: Notification for unresolved pasted clones
+             Shows a persistent notification when the user chose
+             "Accept Anyway" or "Dismiss" on a detected paste-clone,
+             with a "Refactor with Extract Method" action button —
+             using the same engine Scenario 2's tool window button
+             uses. Replaces an earlier gutter-icon (LineMarkerProvider)
+             approach that, after extensive debugging, was found to
+             never be invoked by the platform in this environment
+             even in a minimal unconditional test — notifications are
+             a simpler, more reliable mechanism with no equivalent
+             extension-point fragility.
+             ═══════════════════════════════════════════════ -->
+        <notificationGroup id="CloneGuard" displayType="STICKY_BALLOON" isLogByDefault="true"/>
+
+        <!-- ═══════════════════════════════════════════════
              SCENARIO 2: Tool Window for Scan Results
              Shows clone groups panel at bottom of IDE
              ═══════════════════════════════════════════════ -->
