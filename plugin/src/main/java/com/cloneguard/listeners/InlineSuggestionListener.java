@@ -1,10 +1,16 @@
 package com.cloneguard.listeners;
 
 import com.cloneguard.model.CloneResult;
+import com.cloneguard.model.CloneType;
+import com.cloneguard.refactor.ExtractMethodEngine;
 import com.cloneguard.services.CloneIndexService;
 import com.cloneguard.services.PythonServerClient;
 import com.cloneguard.services.FileScannerService;
 import com.cloneguard.ui.CloneWarningDialog;
+import com.intellij.notification.Notification;
+import com.intellij.notification.NotificationType;
+import com.intellij.openapi.actionSystem.AnAction;
+import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.command.CommandProcessor;
 import com.intellij.openapi.diagnostic.Logger;
@@ -56,6 +62,14 @@ public class InlineSuggestionListener implements EditorFactoryListener {
         editor.getDocument().addDocumentListener(new DocumentListener() {
             @Override
             public void documentChanged(@NotNull DocumentEvent e) {
+                // Ignore edits made by CloneGuard's own refactoring engine —
+                // otherwise Extract Method's own writes get mistaken for a
+                // human paste and trigger this same listener on ourselves.
+                String currentCommand = CommandProcessor.getInstance().getCurrentCommandName();
+                if (currentCommand != null && currentCommand.startsWith("CloneGuard")) {
+                    return;
+                }
+
                 String inserted = e.getNewFragment().toString();
 
                 if (inserted.length() > 30 && looksLikeJavaMethod(inserted)) {
@@ -106,6 +120,19 @@ public class InlineSuggestionListener implements EditorFactoryListener {
 
         if (!result.isClone && !result.isAiGenerated) return;
 
+        // FIX: extract the duplicate method's NAME synchronously, right now,
+        // directly from the text we already captured — rather than looking
+        // it up later via PSI at the paste OFFSET. Found directly from
+        // hand-testing two pastes done in quick succession: the offset-based
+        // lookup happens inside its own later-queued task, which can run
+        // after enough delay (or after a second paste's own document
+        // changes) that the offset no longer points to the right place,
+        // producing "could not find one or both methods" even though the
+        // method clearly existed. A name parsed straight from the captured
+        // text can never go stale — it doesn't depend on the document's
+        // state at all.
+        final String duplicateMethodName = extractMethodNameFromCode(codeToCheck);
+
         final CloneResult finalResult = result;
         ApplicationManager.getApplication().invokeLater(() -> {
             // ── FIX: show the dialog BEFORE touching the editor at all. ────
@@ -141,8 +168,112 @@ public class InlineSuggestionListener implements EditorFactoryListener {
                 } else {
                     LOG.warn("CloneGuard undo: could not locate inserted text to remove — document changed too much");
                 }
+                // Duplicate is being deleted — nothing left to offer refactoring on.
+            } else {
+                // Dismiss or Accept Anyway: the duplicate code stays exactly
+                // where it was pasted. Show a persistent notification with a
+                // "Refactor" action, so the user can come back to it later
+                // without being forced to decide right now.
+                //
+                // NOTE: this replaces an earlier gutter-icon (LineMarkerProvider)
+                // approach that never worked reliably — after extensive
+                // debugging, IntelliJ was confirmed to never invoke ANY custom
+                // LineMarkerProvider in this environment, even a minimal,
+                // unconditional test implementation. Notifications are a
+                // simpler, more robust platform mechanism with no equivalent
+                // extension-point fragility.
+                showRefactorNotification(editor, duplicateMethodName, finalResult);
             }
-            // Dismiss and Accept Anyway intentionally fall through to nothing.
+        });
+    }
+
+    /**
+     * Shows a persistent notification offering to refactor the just-pasted
+     * clone, with a direct "Refactor with Extract Method" action that calls
+     * the same ExtractMethodEngine Scenario 2's tool window button uses.
+     */
+    private void showRefactorNotification(Editor editor, String duplicateName, CloneResult result) {
+        ApplicationManager.getApplication().invokeLater(() -> {
+            Project project = editor.getProject();
+            if (project == null) return;
+
+            VirtualFile vf = FileDocumentManager.getInstance().getFile(editor.getDocument());
+            if (vf == null) return;
+
+            if (duplicateName == null) {
+                LOG.warn("CloneGuard notification: could not determine the pasted method's name from its text");
+                return;
+            }
+
+            String rawMatchedFunction = result.matchedFunction;
+            // FIX: confirmed directly from log output — Layer 2 (server)
+            // detection results include literal "()" as part of the matched
+            // function name (e.g. "sumPositives()"), while Layer 1 (local)
+            // results don't (e.g. "computeMinMaxSum"). A real Java method
+            // name never contains parentheses — PsiMethod.getName() always
+            // returns just the bare name — so searching for "sumPositives()"
+            // can never match anything, explaining exactly why every
+            // server-detected clone failed with "could not find one or both
+            // methods" while every local-detected one succeeded. Stripped
+            // here rather than in the server-response parsing code itself,
+            // since that source wasn't available to inspect directly.
+            final String canonicalName = (rawMatchedFunction != null)
+                    ? rawMatchedFunction.replaceAll("\\(\\)\\s*$", "").trim()
+                    : null;
+            LOG.info("CloneGuard notification DEBUG: canonicalName=[" + canonicalName + "] duplicateName=[" + duplicateName + "]");
+            String cloneTypeLabel = (result.cloneType != null) ? result.cloneType.label : "Clone";
+            int similarityPercent = (int) Math.round(result.similarity * 100);
+
+            Notification notification = new Notification(
+                    "CloneGuard",
+                    "CloneGuard — Possible Duplicate",
+                    duplicateName + "() looks like a " + cloneTypeLabel + " of " + canonicalName
+                            + "() (" + similarityPercent + "% similarity).",
+                    NotificationType.WARNING
+            );
+
+            String actionLabel = (result.cloneType == CloneType.TYPE_4)
+                    ? "Refactor with Method Delegation" : "Refactor with Extract Method";
+            notification.addAction(new AnAction(actionLabel) {
+                @Override
+                public void actionPerformed(@NotNull AnActionEvent e) {
+                    // TEMPORARY DIAGNOSTIC — the very first thing this method
+                    // does, before touching anything else. If this line never
+                    // appears in the log after a delayed click, that proves
+                    // definitively the click never reached this code at all —
+                    // an IntelliJ platform/notification issue, not a bug
+                    // reachable from application code. If it DOES appear,
+                    // something inside is failing silently instead.
+                    LOG.info("CloneGuard ACTION DEBUG: Refactor action invoked for " + duplicateName + "() vs " + canonicalName + "()");
+                    // FIX (found live, this session -- Scenario 1 all-four-
+                    // types test): Type 4 semantic clones share no literal
+                    // code by definition, so Extract Method always correctly
+                    // (if confusingly) says "nothing in common" for them --
+                    // this notification action only ever called extract(),
+                    // with no fallback, unlike Scenario 2's tool window,
+                    // which was given a Delegate route earlier this session.
+                    // Route the same way here for parity.
+                    if (result.cloneType == CloneType.TYPE_4) {
+                        ExtractMethodEngine.getInstance(project).delegate(
+                                vf, canonicalName, duplicateName, cloneTypeLabel,
+                                (updatedFile) -> notification.expire());
+                    } else {
+                        ExtractMethodEngine.getInstance(project).extract(
+                                vf, canonicalName, duplicateName, cloneTypeLabel,
+                                (updatedFile) -> notification.expire());
+                    }
+                }
+            });
+
+            notification.addAction(new AnAction("Dismiss") {
+                @Override
+                public void actionPerformed(@NotNull AnActionEvent e) {
+                    notification.expire();
+                }
+            });
+
+            notification.notify(project);
+            LOG.info("CloneGuard: refactor notification shown for " + duplicateName + "() vs " + canonicalName + "()");
         });
     }
 
@@ -218,6 +349,23 @@ public class InlineSuggestionListener implements EditorFactoryListener {
         int origEnd = origIndex.get(matchEndExclusive - 1) + 1;
 
         return new int[]{origStart, origEnd};
+    }
+
+    /**
+     * Extracts a Java method's NAME directly from its text — the identifier
+     * immediately before the opening "(" of its parameter list, which is
+     * itself immediately preceded by a return type. Deliberately
+     * text-based, not PSI/offset-based: this needs to work on code that
+     * isn't even part of the document yet in any stable way (it's called
+     * synchronously, right when a paste is detected, before any of the
+     * later dialog/notification machinery runs) and must never depend on
+     * document state that could shift by the time it's used.
+     */
+    private String extractMethodNameFromCode(String code) {
+        java.util.regex.Matcher m = Pattern.compile(
+                "(?:public|private|protected|static|final|\\s)+\\s*(?:\\w+(?:<[^>]*>)?(?:\\[\\])?)\\s+(\\w+)\\s*\\("
+        ).matcher(code);
+        return m.find() ? m.group(1) : null;
     }
 
     private boolean looksLikeJavaMethod(String t) {

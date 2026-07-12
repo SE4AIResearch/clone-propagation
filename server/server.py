@@ -236,7 +236,22 @@ def extract_function_name(code, index):
 # <-> isPalindrome). Both endpoints now call these exact same functions.
 
 def get_return_type_shared(code):
-    """Extract return type from a Java method signature."""
+    """Extract return type from a Java method signature.
+
+    FIX: the text this function receives is sometimes BODY-ONLY (starts
+    directly with "{", no "public int methodName(" signature present at
+    all) — confirmed directly via debug output while diagnosing why
+    binarySearchIterative/binarySearchRecursive weren't matching. Without
+    this check, the regex had nothing valid to match near the start of a
+    body-only snippet, and could instead stumble onto something deep in
+    the body that accidentally LOOKED like a signature — e.g. a recursive
+    call "return binarySearchRecursive(...)" was being misread as
+    "TYPE=return, methodName=binarySearchRecursive", producing a fake,
+    wrong return type instead of correctly reporting "can't tell".
+    """
+    stripped = code.strip()
+    if stripped.startswith("{"):
+        return "unknown"
     match = re.search(
         r'(?:public|private|protected|static|final|\s)+\s*(void|int|long|double|float|boolean|String|\w+)\s+\w+\s*\(',
         code
@@ -447,22 +462,22 @@ def if_condition_relational_ops(code):
     return ops
 
 
-def operations_compatible_shared(code1, code2):
+def operations_compatible_shared(code1, code2, name1=None, name2=None):
     """
     Two functions are compatible if same return type AND the operators
     used overlap meaningfully (or share identifier vocabulary). Used by
     BOTH /check and /scan so Scenario 1 and Scenario 2 stay consistent.
+
+    name1/name2: pass the REAL function names when the caller already
+    knows them (both /check and /scan do -- the request always includes a
+    name field). Optional and defaults to re-deriving from code1/code2 via
+    extract_function_name() for callers that genuinely don't have one.
     """
     ret1 = get_return_type_shared(code1)
     ret2 = get_return_type_shared(code2)
     if ret1 != ret2:
         print(f"[CloneGuard] Return type mismatch: {ret1} vs {ret2} — skipping")
         return False
-
-    # FIX (bug #6, round 2): two new structural pre-checks, found via
-    # stress-testing fresh function pairs not in the original bug report.
-    # These run BEFORE the existing operator/identifier checks below and
-    # don't alter any of that logic — purely additive rejection signals.
 
     # (a) Opposite comparison direction inside decision logic (not loop
     # headers). Catches min-vs-max style inversions: findMinimum and
@@ -480,6 +495,67 @@ def operations_compatible_shared(code1, code2):
                   f"{if_ops_1} vs {if_ops_2} (e.g. min-vs-max pattern) — skipping")
             return False
 
+    # Compute recursion/stream status BEFORE the branching-presence check
+    # below, not after -- these need the same exemption the loop-depth
+    # check already gets, for the same reason.
+    #
+    # FIX (found live, this session -- Scenario 2 all-four-types test):
+    # extract_function_name() re-derives a name from code1/code2 via a
+    # regex that requires the METHOD SIGNATURE ("public int foo(...)") to
+    # be present. But FileScannerService.java (Scenario 2's function
+    # extractor) sends body.getText() -- just the "{ ... }" block, no
+    # signature, ever -- so this regex could NEVER match, silently
+    # returning a placeholder "function_-1" name for BOTH sides of EVERY
+    # Layer 2 comparison /scan has ever made. is_recursive_shared() then
+    # searches the body for a self-call to "function_-1(", which of course
+    # never appears, so rec1/rec2 were unconditionally False regardless of
+    # whether the code was actually recursive -- silently breaking Type 4
+    # detection for every genuinely recursive/stream pair Scenario 2 ever
+    # scanned, not just this one test. Confirmed directly via debug
+    # logging: powerIterative vs powerRecursive computed
+    # fn1_name='function_-1' fn2_name='function_-1' rec1=False rec2=False.
+    # The caller (both /check and /scan) already KNOWS the real name from
+    # the request payload -- use that instead of trying to rediscover it
+    # from text that structurally can never contain it.
+    fn1_name = name1 if name1 else extract_function_name(code1, -1)
+    fn2_name = name2 if name2 else extract_function_name(code2, -1)
+    rec1 = is_recursive_shared(code1, fn1_name)
+    rec2 = is_recursive_shared(code2, fn2_name)
+    is_stream1 = bool(re.search(r'\.stream\(|->|\.filter\(|\.map\(|\.collect\(|\.reduce\(', code1))
+    is_stream2 = bool(re.search(r'\.stream\(|->|\.filter\(|\.map\(|\.collect\(|\.reduce\(', code2))
+
+    # FIX (bug #7): the check above only catches opposite-DIRECTION
+    # branching (< vs >). It never asked the more basic question first —
+    # does one function branch on relational comparisons AT ALL, while the
+    # other does not? A pure accumulator (total += arr[i], no if at all)
+    # and a comparison-based tracker (if (x < min) ...; if (x > max) ...)
+    # can still share the arithmetic operator '+' (e.g. via a final
+    # "return min + max"), which is enough to pass the arithmetic-family
+    # check below even though one function never branches and the other
+    # does twice. Presence-of-branching is itself a meaningful signal,
+    # independent of which direction the branching goes.
+    #
+    # FIX (found live, this session): this check originally had NO
+    # recursion/stream exemption, unlike the loop-depth check just below
+    # it -- so a recursive base case (if (n <= 1) return 1;) counted as
+    # "has branching" while its iterative counterpart's loop body (result
+    # *= i;) had none, hard-rejecting the pair BEFORE the recursion-aware
+    # checks below ever ran. Confirmed via live server log: this is
+    # exactly what silently ate factorialIterative vs factorialRecursive
+    # -- a textbook Type 4 semantic clone -- turning "0 clone groups
+    # found" into a false negative rather than a real "not a clone"
+    # result. Recursion and streams don't have a "loop body" for this
+    # question to even apply to, so exempt them the same way loop-depth
+    # already does, rather than treating absence-of-a-loop as absence-of-
+    # branching-in-a-loop.
+    if not rec1 and not rec2 and not is_stream1 and not is_stream2:
+        has_branching_1 = len(if_ops_1) > 0
+        has_branching_2 = len(if_ops_2) > 0
+        if has_branching_1 != has_branching_2:
+            print(f"[CloneGuard] Branching mismatch: one function has conditional "
+                  f"logic inside its loop and the other does not ({if_ops_1} vs {if_ops_2}) — skipping")
+            return False
+
     # (b) Loop nesting depth mismatch, but ONLY when both functions are
     # non-recursive (iterative). A nested-loop matrix-sum and a flat
     # single-pass loop are doing fundamentally different amounts of work
@@ -490,19 +566,6 @@ def operations_compatible_shared(code1, code2):
     # feature of a legitimate Type 4 semantic clone (e.g. factorial's
     # single loop vs factorialRecursive's zero loops) and must not be
     # rejected here.
-    fn1_name = extract_function_name(code1, -1)
-    fn2_name = extract_function_name(code2, -1)
-    rec1 = is_recursive_shared(code1, fn1_name)
-    rec2 = is_recursive_shared(code2, fn2_name)
-    # FIX: stream-based code (e.g. Arrays.stream(...).filter(...).count())
-    # has zero for/while loops by construction, so comparing it against an
-    # iterative loop-based equivalent via raw loop-depth always mismatches
-    # (0 vs 1+) even when they're a genuine Type 4 semantic clone — the
-    # exact same problem recursion already gets excused from, since
-    # recursion and streams are both "different paradigm, same intent"
-    # cases that loop-counting can't fairly compare.
-    is_stream1 = bool(re.search(r'\.stream\(|->|\.filter\(|\.map\(|\.collect\(|\.reduce\(', code1))
-    is_stream2 = bool(re.search(r'\.stream\(|->|\.filter\(|\.map\(|\.collect\(|\.reduce\(', code2))
     if not rec1 and not rec2 and not is_stream1 and not is_stream2:
         depth1 = loop_nesting_depth(code1)
         depth2 = loop_nesting_depth(code2)
@@ -1011,6 +1074,421 @@ def detect_ai():
 
 
 
+# ── Scenario 3: Refactor suggestions (PR bot "Commit suggestion") ────────────
+# Best-effort Python port of ExtractMethodEngine.java's core LCS-based block
+# matching. Deliberately simplified relative to the IDE engine: this produces
+# a SUGGESTION that a human reviews and clicks "Commit suggestion" on in the
+# PR review UI -- it does not need (and does not attempt) every safety
+# guarantee the PSI-based engine has (multi-value escapes -> result class,
+# threading snapshots, etc.), since a human is always in the loop before
+# anything actually gets committed. Where it can't confidently resolve a
+# case, it returns available=False with a plain-English reason instead of
+# guessing.
+#
+# Mirrors the same conclusion already documented for the IDE engine: Type 4
+# (semantic) clones share no literal statements, so there is nothing to
+# extract -- callers should not invoke this for Type 4 groups at all.
+
+LCS_KEYWORDS = {
+    "if", "else", "for", "while", "do", "switch", "case", "return", "break", "continue",
+    "new", "this", "super", "true", "false", "null", "int", "long", "double", "float",
+    "boolean", "char", "byte", "short", "void", "String", "instanceof", "throw", "try",
+    "catch", "finally"
+}
+
+_TOKEN_RE = re.compile(
+    r'"(?:[^"\\]|\\.)*"'      # double-quoted string literal
+    r"|'(?:[^'\\]|\\.)*'"     # char literal
+    r'|\d+(?:\.\d+)?[lLfFdD]?'  # numeric literal (was previously dropped entirely!)
+    r'|[A-Za-z_][A-Za-z0-9_]*'  # identifier
+    r'|[^A-Za-z0-9_\s]+'        # operators/punctuation
+    r'|\s+'                      # whitespace
+)
+
+
+def _tokenize_statement(stmt_text):
+    """Tokenize into (kind, value) pairs, kind in {lit, kw, id, punct}.
+    Member-access fields (arr.length) and call names (foo() ) are tagged
+    'kw' (verbatim, non-substitutable) for the same reason as before --
+    substituting them causes false 'escaping parameter' bugs."""
+    tokens = []
+    for m in _TOKEN_RE.finditer(stmt_text):
+        tok = m.group()
+        if tok.isspace():
+            continue
+        if tok.startswith('"') or tok.startswith("'"):
+            tokens.append(('lit', tok))
+        elif re.fullmatch(r'\d+(?:\.\d+)?[lLfFdD]?', tok):
+            tokens.append(('lit', tok))
+        elif tok in LCS_KEYWORDS:
+            tokens.append(('kw', tok))
+        elif re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', tok):
+            before = stmt_text[:m.start()].rstrip()
+            after = stmt_text[m.end():].lstrip()
+            if before.endswith('.') or after.startswith('('):
+                tokens.append(('kw', tok))
+            else:
+                tokens.append(('id', tok))
+        else:
+            tokens.append(('punct', tok))
+    return tokens
+
+
+def _build_block_mapping(stmts_a_window, stmts_b_window):
+    """Checks whether two equal-length statement windows are structurally
+    identical, building the identifier correspondence AS WE GO across just
+    this window (not from the start of the whole method).
+
+    FIX: the previous approach pre-normalized each method's statements ONCE
+    with a global first-occurrence counter (VAR1, VAR2...) starting from the
+    top of the method. That meant a preceding, unrelated statement (e.g. a
+    guard clause referencing 'arr' before 'total') could shift every
+    placeholder number that followed, so a genuinely identical shared block
+    later in the method would compare as different strings and never match
+    at all. Found directly from a live Type 3 test: sumArraySafe()'s extra
+    leading null-check pushed 'arr' to VAR1 there vs 'total' being VAR1 in
+    sumArray(), and the otherwise-identical loop+return block was missed
+    entirely. Building the mapping fresh per candidate window fixes this --
+    only the relative order WITHIN the compared block matters now, matching
+    however each side happens to declare things earlier.
+
+    Returns (a_to_b, b_to_a) dicts on success, None if not structurally equal.
+    """
+    if len(stmts_a_window) != len(stmts_b_window):
+        return None
+    a_to_b, b_to_a = {}, {}
+    for sa, sb in zip(stmts_a_window, stmts_b_window):
+        ta, tb = _tokenize_statement(sa), _tokenize_statement(sb)
+        if len(ta) != len(tb):
+            return None
+        for (ka, va), (kb, vb) in zip(ta, tb):
+            if ka != kb:
+                return None
+            if ka in ('lit', 'kw', 'punct'):
+                if va != vb:
+                    return None
+            else:  # 'id' -- must be a consistent bijection within this window
+                if va in a_to_b:
+                    if a_to_b[va] != vb:
+                        return None
+                elif vb in b_to_a:
+                    return None
+                else:
+                    a_to_b[va] = vb
+                    b_to_a[vb] = va
+    return a_to_b, b_to_a
+
+
+def _find_longest_common_contiguous_block(stmts_a, stmts_b):
+    """Contiguous match only, not general LCS -- extracting a scattered set
+    of matched statements would silently reorder code. Returns
+    (start_a, start_b, length, (a_to_b, b_to_a)) or None."""
+    best_len, best_i, best_j, best_map = 0, -1, -1, None
+    for i in range(len(stmts_a)):
+        for j in range(len(stmts_b)):
+            length, mapping = 0, None
+            while i + length < len(stmts_a) and j + length < len(stmts_b):
+                cand = _build_block_mapping(stmts_a[i:i + length + 1], stmts_b[j:j + length + 1])
+                if cand is None:
+                    break
+                mapping = cand
+                length += 1
+            if length > best_len:
+                best_len, best_i, best_j, best_map = length, i, j, mapping
+    return None if best_len == 0 else (best_i, best_j, best_len, best_map)
+
+
+def _split_top_level_statements(body_inner):
+    """Lightweight top-level statement splitter (not a full parser). Splits
+    on ';' at depth 0, and treats a balanced {..} block (if/for/while/etc.)
+    as one statement unit ending at its closing brace. Good enough for LCS
+    matching of typical clone-pair snippets."""
+    stmts, depth, paren_depth = [], 0, 0
+    in_string = in_char = escape = False
+    start = 0
+    n = len(body_inner)
+    i = 0
+    while i < n:
+        c = body_inner[i]
+        if escape:
+            escape = False
+        elif in_string:
+            if c == '\\':
+                escape = True
+            elif c == '"':
+                in_string = False
+        elif in_char:
+            if c == '\\':
+                escape = True
+            elif c == "'":
+                in_char = False
+        elif c == '"':
+            in_string = True
+        elif c == "'":
+            in_char = True
+        elif c == '(':
+            paren_depth += 1
+        elif c == ')':
+            paren_depth -= 1
+        elif c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                stmts.append(body_inner[start:i + 1].strip())
+                start = i + 1
+        elif c == ';' and depth == 0 and paren_depth == 0:
+            stmts.append(body_inner[start:i + 1].strip())
+            start = i + 1
+        i += 1
+    tail = body_inner[start:].strip()
+    if tail:
+        stmts.append(tail)
+    return [s for s in stmts if s]
+
+
+def _extract_signature_and_body(full_method_code):
+    idx = full_method_code.find('{')
+    if idx == -1:
+        return None, None
+    sig = full_method_code[:idx].strip()
+    block = full_method_code[idx:].strip()
+    inner = block[1:-1] if block.startswith('{') and block.endswith('}') else block
+    return sig, inner
+
+
+def _extract_params(signature_line):
+    m = re.search(r'\(([^)]*)\)', signature_line)
+    if not m or not m.group(1).strip():
+        return []
+    params = []
+    for part in m.group(1).split(','):
+        toks = part.strip().rsplit(None, 1)
+        if len(toks) == 2:
+            params.append({"type": toks[0], "name": toks[1].lstrip('[]')})
+    return params
+
+
+def _extract_return_type(signature_line):
+    """e.g. 'public int sumArray(int[] arr)' -> 'int'. Returns None if it
+    can't confidently parse one (e.g. constructors, weird formatting)."""
+    m = re.search(r'\b([\w<>\[\],\s]+?)\s+\w+\s*\([^)]*\)\s*$', signature_line.strip())
+    return m.group(1).split()[-1] if m else None
+
+
+def _normalize_type(t):
+    """Loose type comparison -- ignores spacing differences like 'int []'
+    vs 'int[]', and generic parameter names don't need to match verbatim."""
+    return re.sub(r'\s+', '', t or '')
+
+
+def generate_delegation_suggestion(name_a, code_a, name_b, code_b):
+    """
+    Method Delegation: for clones with NO literal shared code (Type 4 --
+    same intent, different implementation, e.g. loop vs recursion) but a
+    compatible signature, Extract Method is a dead end by definition, but
+    delegation only needs a shared CONTRACT (same param types in order,
+    same return type), not shared statements. Rewrites duplicate to simply
+    call canonical -- no helper method needed at all, which makes this
+    actually simpler to apply than Extract Method.
+
+    Returns {"available": True, "technique": "delegation", "newDuplicateBody"}
+    or {"available": False, "reason": "..."}.
+    """
+    try:
+        sig_a, _ = _extract_signature_and_body(code_a)
+        sig_b, _ = _extract_signature_and_body(code_b)
+        if sig_a is None or sig_b is None:
+            return {"available": False, "reason": "Could not parse method signature."}
+
+        params_a = _extract_params(sig_a)
+        params_b = _extract_params(sig_b)
+        if len(params_a) != len(params_b):
+            return {
+                "available": False,
+                "reason": f"{name_a}() takes {len(params_a)} parameter(s) but {name_b}() "
+                          f"takes {len(params_b)} — delegation needs a matching signature."
+            }
+        for i, (pa, pb) in enumerate(zip(params_a, params_b)):
+            if _normalize_type(pa["type"]) != _normalize_type(pb["type"]):
+                return {
+                    "available": False,
+                    "reason": f"Parameter {i+1} type differs ({pa['type']} vs {pb['type']}) — "
+                              f"delegation needs a matching signature."
+                }
+
+        return_a = _extract_return_type(sig_a)
+        return_b = _extract_return_type(sig_b)
+        if _normalize_type(return_a) != _normalize_type(return_b):
+            return {
+                "available": False,
+                "reason": f"Return types differ ({return_a} vs {return_b}) — "
+                          f"delegation needs a matching signature."
+            }
+
+        call_args = ", ".join(p["name"] for p in params_b)
+        if _normalize_type(return_b) == "void":
+            new_duplicate_body = f"{sig_b} {{\n    {name_a}({call_args});\n}}"
+        else:
+            new_duplicate_body = f"{sig_b} {{\n    return {name_a}({call_args});\n}}"
+
+        return {
+            "available": True,
+            "technique": "delegation",
+            "delegatesTo": name_a,
+            "newDuplicateBody": new_duplicate_body,
+        }
+    except Exception as e:
+        return {"available": False, "reason": f"Delegation check failed: {e}"}
+
+
+def generate_extract_suggestion(name_a, code_a, name_b, code_b):
+    """
+    canonical = (name_a, code_a), duplicate = (name_b, code_b).
+    Tries Extract Method first (needs a literal shared statement block).
+    If no shared block exists -- the Type 4 case, by definition -- falls
+    back to Method Delegation (needs only a compatible signature, not
+    shared code). Returns a dict with "technique": "extract" | "delegation"
+    on success, so callers (the CI workflow) know which shape of fix to post.
+    """
+    try:
+        sig_a, inner_a = _extract_signature_and_body(code_a)
+        sig_b, inner_b = _extract_signature_and_body(code_b)
+        if inner_a is None or inner_b is None:
+            return {"available": False, "reason": "Could not parse method body."}
+
+        stmts_a = _split_top_level_statements(inner_a)
+        stmts_b = _split_top_level_statements(inner_b)
+        if len(stmts_a) < 2 or len(stmts_b) < 2:
+            return {"available": False, "reason": "Method body too short to extract."}
+
+        block = _find_longest_common_contiguous_block(stmts_a, stmts_b)
+        if block is None or block[2] < 2:
+            # No literal shared fragment -- Extract Method has nothing to
+            # work with by definition (this is the Type 4 case). Try
+            # delegation instead before giving up entirely.
+            delegation = generate_delegation_suggestion(name_a, code_a, name_b, code_b)
+            if delegation.get("available"):
+                return delegation
+            return {
+                "available": False,
+                "reason": "No shared code fragment found — likely a Type 4 semantic "
+                          "clone (same intent, different implementation). Extract "
+                          "Method needs literal shared statements, and Method "
+                          f"Delegation isn't safe either: {delegation.get('reason', 'incompatible signatures')}"
+            }
+
+        start_a, start_b, length, (a_to_b, b_to_a) = block
+        block_stmts_a = stmts_a[start_a:start_a + length]
+        after_a = stmts_a[start_a + length:]
+        joined_block_a = ' '.join(block_stmts_a)
+        joined_after_a = ' '.join(after_a)
+
+        # If the block itself ends with a return, that return travels with
+        # it into the helper -- this is NOT the "escaping variable" case
+        # (nothing needs to survive past the block boundary), it's a direct
+        # return-type match against the method's own declared return type.
+        block_ends_in_return = bool(re.match(r'^return\b', block_stmts_a[-1].strip())) if block_stmts_a else False
+
+        declared_in_block_a = set(re.findall(
+            r'\b(?:int|long|double|float|boolean|char|byte|short|String|var|[A-Z]\w*(?:<[^>]*>)?)\s+(\w+)\s*=',
+            joined_block_a))
+        escaping = [v for v in declared_in_block_a if re.search(r'\b' + re.escape(v) + r'\b', joined_after_a)]
+        if len(escaping) > 1:
+            return {
+                "available": False,
+                "reason": f"Multiple values ({', '.join(escaping)}) escape the shared "
+                          f"block — needs a result-holder class, which this bot doesn't "
+                          f"attempt automatically. Extract manually in the IDE instead."
+            }
+        escaping_var = escaping[0] if escaping else None
+
+        # helper params: every identifier the block-mapping paired up that
+        # ISN'T declared inside the block itself (i.e. it came from a param
+        # or an earlier statement) -- the mapping already gives canonical's
+        # real name -> duplicate's real name directly, no reverse-lookup needed.
+        helper_params = [
+            {"canonical_name": real_a, "duplicate_name": real_b}
+            for real_a, real_b in a_to_b.items()
+            if real_a not in declared_in_block_a
+        ]
+
+        param_types = {p["name"]: p["type"] for p in _extract_params(sig_a)}
+        sig_params = ", ".join(
+            f'{param_types.get(p["canonical_name"], "Object")} {p["canonical_name"]}'
+            for p in helper_params
+        )
+
+        if block_ends_in_return:
+            # Return type comes from canonical's own signature, e.g.
+            # "public int sumPositives(int[] arr)" -> "int".
+            ret_match = re.search(r'\b([\w<>\[\],\s]+?)\s+\w+\s*\([^)]*\)\s*$', sig_a)
+            return_type = ret_match.group(1).split()[-1] if ret_match else "var"
+        elif escaping_var:
+            decl_match = re.search(
+                r'\b(int|long|double|float|boolean|char|byte|short|String|\w+(?:<[^>]*>)?)\s+'
+                + re.escape(escaping_var) + r'\s*=', joined_block_a)
+            return_type = decl_match.group(1) if decl_match else "var"
+        else:
+            return_type = "void"
+
+        helper_name = "core" + name_b[:1].upper() + name_b[1:]
+
+        # block_stmts_a already includes the trailing "return ...;" verbatim
+        # when block_ends_in_return is true -- don't append a second one.
+        helper_body_lines = list(block_stmts_a)
+        if escaping_var and not block_ends_in_return:
+            helper_body_lines.append(f"return {escaping_var};")
+        helper_code = (
+            f"private static {return_type} {helper_name}({sig_params}) {{\n    "
+            + "\n    ".join(helper_body_lines) + "\n}"
+        )
+
+        call_args = ", ".join(p["duplicate_name"] for p in helper_params)
+        if block_ends_in_return:
+            call_line = f"return {helper_name}({call_args});"
+        elif escaping_var:
+            escaping_var_b = a_to_b.get(escaping_var, escaping_var)
+            call_line = f"{return_type} {escaping_var_b} = {helper_name}({call_args});"
+        else:
+            call_line = f"{helper_name}({call_args});"
+
+        new_duplicate_stmts = stmts_b[:start_b] + [call_line] + stmts_b[start_b + length:]
+        new_duplicate_body = sig_b + " {\n    " + "\n    ".join(new_duplicate_stmts) + "\n}"
+
+        # FIX: without this, the helper's body is a byte-identical copy of
+        # canonical's block (since it's built FROM canonical's block) while
+        # canonical itself is left untouched -- meaning the very next scan
+        # flags helper<->canonical as a brand-new Type 1 exact clone, and
+        # "fixing" THAT produces coreCoreXxx, ad infinitum. Found directly
+        # from a live PR test: applying one suggestion triggered a second,
+        # near-identical one on every subsequent scan. Rewriting canonical
+        # to delegate too closes the loop -- both sides end up calling the
+        # helper, so neither has a body left to be a duplicate of anything.
+        call_args_a = ", ".join(p["canonical_name"] for p in helper_params)
+        if block_ends_in_return:
+            call_line_a = f"return {helper_name}({call_args_a});"
+        elif escaping_var:
+            call_line_a = f"{return_type} {escaping_var} = {helper_name}({call_args_a});"
+        else:
+            call_line_a = f"{helper_name}({call_args_a});"
+
+        new_canonical_stmts = stmts_a[:start_a] + [call_line_a] + stmts_a[start_a + length:]
+        new_canonical_body = sig_a + " {\n    " + "\n    ".join(new_canonical_stmts) + "\n}"
+
+        return {
+            "available": True,
+            "technique": "extract",
+            "helperName": helper_name,
+            "helperCode": helper_code,
+            "newDuplicateBody": new_duplicate_body,
+            "newCanonicalBody": new_canonical_body,
+            "matchedStatements": length
+        }
+    except Exception as e:
+        return {"available": False, "reason": f"Suggestion generation failed: {e}"}
+
+
 # ── Scenario 3: /scan endpoint ────────────────────────────────────────────────
 # Accepts a list of Java functions (name + code pairs) from a PR.
 # Runs full Layer 1 + Layer 2 detection across all functions.
@@ -1120,6 +1598,33 @@ def scan_file():
         )
         return bool(delegation_pattern.match(inner))
 
+    def is_refactor_wrapper(code):
+        """
+        Broader than is_delegation_wrapper(): returns True if this method's
+        body calls one of CloneGuard's own generated helper methods.
+
+        Both refactoring techniques the plugin uses always route through a
+        helper named "core" + PascalCase (e.g. coreSumPositives,
+        coreSumPositives2 if a name collision required a suffix) —
+        Method Delegation's output matches is_delegation_wrapper() above
+        (a single-line call, nothing else), but Extract Method's output does
+        NOT — it can keep extra statements that were unique to that specific
+        method (e.g. a preserved println), so the body is no longer a single
+        statement and the narrow pattern above misses it entirely.
+
+        Since we control the naming convention of every helper CloneGuard
+        generates, checking for a call to a core*-named method is a reliable
+        signal that this body is a refactor byproduct, not an independent
+        implementation — regardless of how many other statements remain.
+        Two such wrappers calling DIFFERENT helpers can still look similar
+        to each other structurally/semantically (both are short and mostly
+        boilerplate), which is exactly the false-positive this closes.
+        """
+        if is_delegation_wrapper(code):
+            return True
+        body = extract_body_local(code)
+        return bool(re.search(r'\bcore[A-Z]\w*\s*\(', body))
+
     # ── Layer 1: Type 1 and Type 2 — all pairs ───────────────────────────────
     for i, fn_i in enumerate(scan_functions):
         body_i = normalize_body(extract_body_local(fn_i["snippet"]))
@@ -1138,9 +1643,21 @@ def scan_file():
 
             # Type 1: exact body match
             if body_i == body_j:
-                # Skip if both are delegation wrappers — intentional pattern, not a clone
-                if is_delegation_wrapper(fn_i["snippet"]) and is_delegation_wrapper(fn_j["snippet"]):
-                    print(f"[CloneGuard] /scan skipping delegation wrappers: {fn_i['name']} <-> {fn_j['name']}")
+                # Skip if EITHER side is a refactor-generated wrapper.
+                # FIX: previously only skipped when BOTH sides were wrappers,
+                # which meant a leftover generated helper (e.g.
+                # coreSumPositives) could still get compared against a
+                # completely unrelated ORIGINAL function (e.g.
+                # fibonacciRecursive) and score a coincidentally high
+                # similarity from CodeBERT despite sharing no real meaning —
+                # found directly from hand-testing. A generated wrapper is
+                # internal, tool-produced delegation code from an already-
+                # accepted refactor, not something the user wrote with
+                # intent to be judged for duplication — it shouldn't be
+                # re-flagged against anything else, not just against other
+                # wrappers.
+                if is_refactor_wrapper(fn_i["snippet"]) or is_refactor_wrapper(fn_j["snippet"]):
+                    print(f"[CloneGuard] /scan skipping refactor wrappers: {fn_i['name']} <-> {fn_j['name']}")
                     seen_pairs.add(pair_key)
                     continue
                 clone_groups.append({
@@ -1153,16 +1670,20 @@ def scan_file():
                     "severity": "Critical",
                     "recommendation": f"{fn_j['name']}() is an exact copy of {fn_i['name']}(). Remove duplicate and reuse original."
                 })
+                clone_groups[-1]["suggestion"] = generate_extract_suggestion(
+                    fn_i["name"], fn_i["snippet"], fn_j["name"], fn_j["snippet"])
                 seen_pairs.add(pair_key)
                 print(f"[CloneGuard] /scan Type 1: {fn_i['name']} <-> {fn_j['name']}")
                 continue
 
             # Type 2 vs Type 3: normalized structure match
             if stripped_i == stripped_j and stripped_i != "":
-                # Skip if BOTH methods are delegation wrappers —
-                # they were intentionally refactored to delegate and are not clones
-                if is_delegation_wrapper(fn_i["snippet"]) and is_delegation_wrapper(fn_j["snippet"]):
-                    print(f"[CloneGuard] /scan skipping delegation wrappers: {fn_i['name']} <-> {fn_j['name']}")
+                # Skip if BOTH methods are refactor-generated wrappers —
+                # they were intentionally refactored (Delegation or Extract
+                # Method) and are not clones of each other, even if their
+                # remaining bodies happen to look structurally similar.
+                if is_refactor_wrapper(fn_i["snippet"]) or is_refactor_wrapper(fn_j["snippet"]):
+                    print(f"[CloneGuard] /scan skipping refactor wrappers: {fn_i['name']} <-> {fn_j['name']}")
                     seen_pairs.add(pair_key)
                     continue
                 stmts_i = len(re.findall(r';', extract_body_local(fn_i["snippet"])))
@@ -1179,6 +1700,8 @@ def scan_file():
                         "severity": "High",
                         "recommendation": f"{fn_j['name']}() has the same structure as {fn_i['name']}() with renamed variables. Consolidate into one function."
                     })
+                    clone_groups[-1]["suggestion"] = generate_extract_suggestion(
+                        fn_i["name"], fn_i["snippet"], fn_j["name"], fn_j["snippet"])
                     seen_pairs.add(pair_key)
                     print(f"[CloneGuard] /scan Type 2: {fn_i['name']} <-> {fn_j['name']}")
                 else:
@@ -1193,11 +1716,23 @@ def scan_file():
                         "severity": "High",
                         "recommendation": f"{fn_j['name']}() is a near-miss clone of {fn_i['name']}() with minor additions. Extract shared logic."
                     })
+                    clone_groups[-1]["suggestion"] = generate_extract_suggestion(
+                        fn_i["name"], fn_i["snippet"], fn_j["name"], fn_j["snippet"])
                     seen_pairs.add(pair_key)
                     print(f"[CloneGuard] /scan Type 3: {fn_i['name']} <-> {fn_j['name']}")
 
     # ── Layer 2: Type 3 and Type 4 ───────────────────────────────────────────
     layer1_names = {g["functionA"] for g in clone_groups} | {g["functionB"] for g in clone_groups}
+
+    # FIX (bug #7): previously nothing stopped a single function from being
+    # claimed by MORE than one Layer 2 group in the same scan (observed
+    # directly: computeMinMaxSum appeared paired with both computeA AND
+    # computeB simultaneously). Track which names have already been used in
+    # a Layer 2 group and skip any further pair involving them — each
+    # function gets at most one Layer 2 match per scan, first (highest-
+    # scoring, since pairs are still gated by the 0.90 threshold below)
+    # match wins.
+    layer2_claimed = set()
 
     for i in range(len(scan_functions)):
         for j in range(i + 1, len(scan_functions)):
@@ -1211,11 +1746,30 @@ def scan_file():
             if fn_i["name"] in layer1_names and fn_j["name"] in layer1_names:
                 continue
 
+            if fn_i["name"] in layer2_claimed or fn_j["name"] in layer2_claimed:
+                continue
+
+            # This check was previously ONLY applied in the Layer 1 loop
+            # above — Layer 2 (semantic/CodeBERT) had no equivalent
+            # safeguard at all. That gap is exactly what let two
+            # Extract-Method-generated wrappers (e.g. sumPositives() and
+            # sumPositiveValues() after both were rewritten to call their
+            # own core*() helpers) get re-flagged as a brand-new Type 3/4
+            # clone of EACH OTHER once their remaining bodies happened to
+            # look similar — even though neither is being compared against
+            # its own helper, they're being compared against each other,
+            # post-refactor, and both are legitimate wrappers.
+            if is_refactor_wrapper(fn_i["snippet"]) or is_refactor_wrapper(fn_j["snippet"]):
+                print(f"[CloneGuard] /scan skipping refactor wrappers (Layer 2): {fn_i['name']} <-> {fn_j['name']}")
+                seen_pairs.add(pair_key)
+                continue
+
             semantic_score = float(np.dot(fn_i["embedding"], fn_j["embedding"]))
             if semantic_score < 0.90:
                 continue
 
-            if not operations_compatible_shared(fn_i["snippet"], fn_j["snippet"]):
+            if not operations_compatible_shared(fn_i["snippet"], fn_j["snippet"],
+                                                 name1=fn_i["name"], name2=fn_j["name"]):
                 continue
 
             pos_score = structural_similarity(
@@ -1281,7 +1835,21 @@ def scan_file():
                 "severity": severity,
                 "recommendation": rec,
             })
+            if same_shape:
+                clone_groups[-1]["suggestion"] = generate_extract_suggestion(
+                    fn_i["name"], fn_i["snippet"], fn_j["name"], fn_j["snippet"])
+            else:
+                # Type 4 — no literal shared fragment can exist by
+                # definition, so Extract Method is skipped, but
+                # generate_extract_suggestion() internally falls back to
+                # Method Delegation (needs only a compatible signature, not
+                # shared code) before giving up. This is what actually lets
+                # Type 4 clones get a real, applicable suggestion now.
+                clone_groups[-1]["suggestion"] = generate_extract_suggestion(
+                    fn_i["name"], fn_i["snippet"], fn_j["name"], fn_j["snippet"])
             seen_pairs.add(pair_key)
+            layer2_claimed.add(fn_i["name"])
+            layer2_claimed.add(fn_j["name"])
             print(f"[CloneGuard] /scan {clone_type}: {fn_i['name']} <-> {fn_j['name']}")
 
     print(f"[CloneGuard] /scan complete: {len(clone_groups)} clone groups found")
@@ -1292,6 +1860,29 @@ def scan_file():
         "scannedFunctions": len(scan_functions),
         "filename": filename
     })
+
+@app.route("/suggest", methods=["POST"])
+def suggest_single_pair():
+    """
+    Dedicated single-pair endpoint for the checkbox-driven batch refactor
+    flow. The apply-refactors workflow already knows exactly which pair the
+    person selected (parsed from the checklist comment) -- it doesn't need
+    a full /scan, just "given these two functions RIGHT NOW, what's the
+    suggestion." Re-run explicitly at apply-time (not reusing the original
+    scan's cached suggestion) so it reflects the file's current state, not
+    whatever it looked like when the checklist was first posted.
+    """
+    data = request.get_json(force=True) or {}
+    name_a, code_a = data.get("nameA", ""), data.get("codeA", "")
+    name_b, code_b = data.get("nameB", ""), data.get("codeB", "")
+    if not all([name_a, code_a, name_b, code_b]):
+        return jsonify({"available": False, "reason": "Missing nameA/codeA/nameB/codeB"}), 400
+    try:
+        suggestion = generate_extract_suggestion(name_a, code_a, name_b, code_b)
+    except Exception as e:
+        suggestion = {"available": False, "reason": f"Suggestion failed: {e}"}
+    return jsonify(suggestion)
+
 
 @app.route("/health", methods=["GET"])
 def health():
