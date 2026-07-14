@@ -275,6 +275,63 @@ def identifier_overlap_shared(code1, code2):
         "String","List","Map","Set","Arrays","System","Math","Integer","Double"
     }
 
+    # FIX (found live, this session -- rigorous multi-function scan test,
+    # round 3): a single shared GENERIC identifier -- e.g. "arr", the
+    # default name for practically any array parameter in this codebase --
+    # was enough on its own to push overlap above the 0.05 bypass
+    # threshold, skipping the operator-overlap check entirely regardless of
+    # how weak the real operator signal was. Confirmed live: coreLastElement2()
+    # (body is just "return arr[arr.length - 1];", identifier set = {"arr"})
+    # and reverseArrayRecursive() (identifiers {"arr","result","index"})
+    # share only "arr" -- overlap = 1/3 ≈ 0.33, comfortably over 0.05 --
+    # letting two functions with essentially nothing in common except a
+    # naming convention pass as a false Type 4 match. Same root issue as
+    # the earlier ubiquitous-OPERATOR fix, just for identifiers: exclude a
+    # stoplist of extremely common, semantically-empty parameter/variable
+    # names from counting toward overlap before computing the ratio.
+    # FIX (found live, this session, round 4): the round-3 stoplist above
+    # was too broad. Excluding "result" alongside "arr"/"length" correctly
+    # kept coreLastElement2()/reverseArrayRecursive() rejected (that pair
+    # never used "result" at all, so it didn't need "result" excluded) but
+    # ALSO incorrectly rejected the real Type 4 pair
+    # reverseArrayIterative()/reverseArrayRecursive() -- both genuinely use
+    # "result" as their return-array variable, which IS meaningful shared
+    # signal that two functions are building the same kind of output,
+    # unlike "arr" (just the input parameter name, used by nearly every
+    # array function regardless of purpose) or "length" (from arr.length,
+    # equally universal). Narrowed the stoplist to only the specific terms
+    # actually responsible for the false positive, confirmed via direct
+    # testing against both the false-positive and the true-positive case
+    # rather than guessing at a broader list.
+    # FIX (found live, this session, round 5): "position" is another
+    # generic recursion-index parameter name (alongside "arr"/"length"),
+    # used by unrelated recursive helpers across different domains
+    # (maxValueHelper's array position, reverseArrayRecursive's array
+    # position) purely by naming convention, not genuine relatedness.
+    # FIX (found live, this session, round 7): "numbers" is used as the
+    # array-parameter name by multiple UNRELATED functions in this test
+    # file (maxValueIterative, maxValueHelper, sumEvenNumbersLoop,
+    # sumEvenNumbersStream, countZerosInArray) purely by naming
+    # convention -- confirmed via direct test as the cause of
+    # maxValueHelper()/sumEvenNumbersLoop() (unrelated: array-max vs
+    # even-number-summing) passing on identifier overlap alone (0.167,
+    # well over the 0.05 bar) despite having no real operator overlap.
+    # FIX (found live, this session, round 10 -- corrects a real regression
+    # from round 3): the generic-identifier stoplist (removing "arr",
+    # "length", "position", "numbers", "total") correctly fixed several
+    # false positives, but it had an uncaught side effect: lastElement()/
+    # lastElementSafe() -- a real, confirmed Type 3 match -- was ALSO being
+    # saved purely by shared "arr" identifier overlap (both functions'
+    # entire vocabulary is just "arr"), and silently broke once "arr" was
+    # stoplisted, without this being caught in later regression passes.
+    # Direct testing found a clean, evidence-based gap instead: raw overlap
+    # (no stoplist) for lastElement/lastElementSafe is 0.500, while EVERY
+    # confirmed false positive tops out at 0.222 (coreLastElement2/
+    # reverseArrayRecursive=0.143, maxValueHelper/reverseArrayRecursive=
+    # 0.222, maxValueIterative/joinWordsLoop=0.100, sumValuesExact/
+    # reverseArrayRecursive=0.125). A threshold in that gap separates all
+    # of them correctly without needing to guess at which specific words
+    # are "too generic" -- removed the stoplist, raising the bar instead.
     def tokens(code):
         code = re.sub(r"//[^\n]*", "", code)
         code = re.sub(r"/\*[\s\S]*?\*/", "", code)
@@ -288,6 +345,8 @@ def identifier_overlap_shared(code1, code2):
 
     set1 = set(w.lower() for w in t1)
     set2 = set(w.lower() for w in t2)
+    if not set1 or not set2:
+        return 0.0
     return len(set1 & set2) / max(1, len(set1 | set2))
 
 
@@ -477,7 +536,7 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
     ret2 = get_return_type_shared(code2)
     if ret1 != ret2:
         print(f"[CloneGuard] Return type mismatch: {ret1} vs {ret2} — skipping")
-        return False
+        return False, False
 
     # (a) Opposite comparison direction inside decision logic (not loop
     # headers). Catches min-vs-max style inversions: findMinimum and
@@ -493,7 +552,7 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
         if (if_ops_1 == side_a and if_ops_2 == side_b) or (if_ops_1 == side_b and if_ops_2 == side_a):
             print(f"[CloneGuard] Opposite if-condition comparison direction: "
                   f"{if_ops_1} vs {if_ops_2} (e.g. min-vs-max pattern) — skipping")
-            return False
+            return False, False
 
     # Compute recursion/stream status BEFORE the branching-presence check
     # below, not after -- these need the same exemption the loop-depth
@@ -554,7 +613,7 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
         if has_branching_1 != has_branching_2:
             print(f"[CloneGuard] Branching mismatch: one function has conditional "
                   f"logic inside its loop and the other does not ({if_ops_1} vs {if_ops_2}) — skipping")
-            return False
+            return False, False
 
     # (b) Loop nesting depth mismatch, but ONLY when both functions are
     # non-recursive (iterative). A nested-loop matrix-sum and a flat
@@ -571,7 +630,7 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
         depth2 = loop_nesting_depth(code2)
         if depth1 != depth2:
             print(f"[CloneGuard] Loop nesting depth mismatch: {depth1} vs {depth2} — skipping")
-            return False
+            return False, False
 
         # (c) Fixed-literal loop bound vs data-dependent loop bound.
         # sumArray() (bound = arr.length) and doubleValue() (bound = the
@@ -587,7 +646,7 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
             dd2, fixed2 = has_data_dependent_loop_bound(code2)
             if (dd1 and fixed2 and not dd2) or (dd2 and fixed1 and not dd1):
                 print(f"[CloneGuard] Loop bound mismatch: data-dependent vs fixed-literal — skipping")
-                return False
+                return False, False
 
     fp1 = operator_fingerprint_shared(code1)
     fp2 = operator_fingerprint_shared(code2)
@@ -596,7 +655,7 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
     # functions should never match pure-arithmetic functions.
     if ('string' in fp1) != ('string' in fp2):
         print(f"[CloneGuard] String operator mismatch: {fp1} vs {fp2} — skipping")
-        return False
+        return False, False
 
     # Arithmetic operator family must overlap meaningfully — a sum (+/+=)
     # function and a product (*/*=) function are never clones of each
@@ -606,14 +665,14 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
     arith2 = fp2 & arithmetic_ops
     if arith1 and arith2 and arith1.isdisjoint(arith2):
         print(f"[CloneGuard] Arithmetic operator mismatch: {fp1} vs {fp2} — skipping")
-        return False
+        return False, False
     if bool(arith1) != bool(arith2):
         # Allow exception: bitwise-only functions vs arithmetic with mod
         # (e.g. n % 2 == 0  vs  n & 1 == 0) — both check evenness via a
         # single comparison, so let identifier/structural score decide.
         if not (('bitwise' in fp1 or 'bitwise' in fp2) and ('%' in fp1 or '%' in fp2)):
             print(f"[CloneGuard] Arithmetic presence mismatch: {fp1} vs {fp2} — skipping")
-            return False
+            return False, False
 
     # Identifier vocabulary overlap — catches totally unrelated functions
     # (e.g. square vs greet, isPalindrome vs reverseWords) that share no
@@ -639,16 +698,141 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
     # bar on their own; '+', '-', '*', '<', '>' (ubiquitous in ordinary
     # loops/accumulators) still require genuine richness.
     RARE_OPS = {'/', '%'}
+    # FIX (found live, this session -- Scenario 2 all-four-types test):
+    # the comment above states ubiquitous operators ('+', '-', '*', '<',
+    # '>') "still require genuine richness" to count as meaningful overlap
+    # signal, but the code below never actually enforced that -- it counted
+    # ANY 2 shared operators toward the "sufficient_overlap" bar, ubiquitous
+    # or not. This let coreArrayAverage() (sum += arr[i]; ... sum / len)
+    # and isPrimeHelper() (divisor*divisor > n; n % divisor; divisor + 1)
+    # pass as "sufficiently overlapping" purely because both happen to use
+    # '+' and '<' somewhere -- two operators present in nearly every
+    # numeric loop -- with zero shared identifiers and no real semantic
+    # relationship. Confirmed live: this is exactly what let that pair
+    # reach a 99% CodeBERT similarity score and get reported as a false
+    # Type 4 match. Only operators OUTSIDE the ubiquitous set now count
+    # toward the "2+ categories" bar; ubiquitous ones can still contribute
+    # via the RARE_OPS path or identifier overlap, just not on their own.
+    UBIQUITOUS_OPS = {'+', '-', '*', '<', '>', '=='}
     overlap = identifier_overlap_shared(code1, code2)
     shared_ops = fp1 & fp2
     shared_rare_ops = shared_ops & RARE_OPS
-    sufficient_overlap = len(shared_ops) >= 2 or len(shared_rare_ops) >= 1
-    if overlap < 0.05 and not sufficient_overlap:
-        print(f"[CloneGuard] No identifier or operator overlap: {fp1} vs {fp2}, "
-              f"shared_ops={shared_ops}, overlap={overlap:.3f} — skipping")
-        return False
+    meaningful_shared_ops = shared_ops - UBIQUITOUS_OPS
 
-    return True
+    # FIX (found live, this session, round 2 -- rigorous multi-function scan
+    # test): the round-1 fix above correctly rejects coreArrayAverage() vs
+    # isPrimeHelper() (shared_ops={'+','<'}, both ubiquitous, 0% identifier
+    # overlap) -- but factorialIterative()/factorialRecursive(), a genuine
+    # Type 4 clone, has the EXACT SAME operator-overlap profile: shared_ops
+    # = {'<','*'}, also both ubiquitous, also 0% identifier overlap (no
+    # shared variable names -- "result"/"i" vs just self-recursion, nothing
+    # in common). An absolute op-count check literally cannot tell these two
+    # cases apart -- they're identical in that reduced feature space. What
+    # DOES differ: how much of each function's total operator vocabulary
+    # the shared ops actually cover. factorialIterative's fingerprint is
+    # {<,*} and factorialRecursive's is {<,*,-} -- they share 2 of a
+    # combined 3 distinct operators (jaccard ~0.67). coreArrayAverage's
+    # fingerprint is {+,<,/} and isPrimeHelper's is {<,*,>,%,==,+} -- they
+    # share 2 of a combined 7 (jaccard ~0.29). Two functions whose ENTIRE
+    # operator vocabulary is nearly identical are much more likely to be
+    # doing the same thing than two functions that happen to overlap on 2
+    # ops out of a much richer combined set. Require a union of at least 2
+    # operators (so a trivial single-shared-op case isn't judged on ratio
+    # alone -- that's still gated by RARE_OPS/identifier overlap above).
+    # FIX (found live, this session, round 6 -- explicit product decision:
+    # zero false positives takes priority over recall): the jaccard-ratio
+    # path below was added to rescue factorialIterative()/factorialRecursive()
+    # after the round-1 fix over-corrected. But direct testing proved the
+    # ratio is mathematically unable to distinguish that real match from
+    # coincidental false positives -- maxValueHelper()/reverseArrayRecursive()
+    # (unrelated: array-max vs array-reversal) shares {'>','+'} out of a
+    # union of 3 (ratio 0.67), and maxValueIterative()/joinWordsLoop()
+    # (completely unrelated: numeric max vs string joining) shares {'<','>'}
+    # out of a union of 2 (ratio 1.0) -- both HIGHER ratios than several
+    # confirmed-real matches. There is no ratio threshold that keeps the
+    # true positives and rejects these false positives; they occupy the
+    # same region of this feature space. Per explicit decision, this local
+    # syntactic pre-filter is now a hard requirement (2+ non-ubiquitous
+    # shared operators, OR 1+ shared RARE operator, OR meaningful shared
+    # identifiers) rather than a soft ratio -- this WILL miss some real
+    # Type 4 pairs whose only signal is 2 ubiquitous operators with no
+    # other overlap (e.g. factorialIterative/factorialRecursive,
+    # maxValueIterative/maxValueHelper in isolation). That tradeoff is
+    # intentional: a missed duplicate is recoverable by a human reviewer:
+    # a bad auto-refactor of two unrelated functions is not.
+    # FIX (found live, this session, round 9 -- final decision: simplicity
+    # and reliability over maximum recall): rounds 6-8 tried increasingly
+    # careful ways to keep SOME value from "1 shared rare operator (%, /)
+    # alone" as evidence, ending with a low-confidence warning system that
+    # requires Java-side UI changes to actually surface. Per explicit
+    # decision, dropping that path entirely instead: rare operators now
+    # only count toward the SAME "2+ meaningful ops" bar as everything
+    # else, never as a standalone pass on their own. This means
+    # isPrimeIterative()/isPrimeHelper() and divideNumbers()/safeDivide()
+    # -- both of which relied SOLELY on this single-rare-op path -- will no
+    # longer be auto-detected, silently and without warning; they simply
+    # won't appear as a flagged clone group at all. In exchange: every
+    # remaining path to "sufficient_overlap" now requires genuinely
+    # corroborated evidence (2+ non-ubiquitous shared operators, or real
+    # identifier overlap), which every false positive found today
+    # (coreArrayAverage/isPrimeHelper, gcdIterative/isPrimeHelper,
+    # isPrimeIterative/sumDigitsHelper, sumDigitsIterative/
+    # sumEvenNumbersLoop, and all the identifier-driven ones) fails. Any
+    # Type 4 group that IS flagged from here on has strong evidence behind
+    # it and should refactor correctly with no residual judgment calls
+    # needed -- this is a hard requirement (server-side only), not a
+    # warning that depends on the plugin UI reading and displaying it.
+    # REVERTED round 9 back to round 8, per explicit decision: the fully
+    # strict version (round 9) correctly eliminated every false positive,
+    # but at the cost of silently dropping isPrimeIterative()/isPrimeHelper()
+    # and divideNumbers()/safeDivide() entirely -- both real matches the
+    # user needs working (isPrimeIterative/isPrimeHelper is the flagship
+    # wrapper-delegation demo). Back to: rare-op-alone still counts as
+    # sufficient evidence, but any match relying ONLY on that weakest path
+    # is flagged low-confidence so the plugin UI can warn before applying.
+    sufficient_overlap = len(meaningful_shared_ops) >= 2 or len(shared_rare_ops) >= 1
+    # FIX (found live, this session, round 11 -- corrects an over-broad
+    # exemption): the stream exemption above unconditionally set
+    # sufficient_overlap=True the instant EITHER side was a stream
+    # function, regardless of whether the other side had ANYTHING to do
+    # with it -- confirmed live: isPrimeHelper() (a recursive
+    # prime-checking helper, not remotely related to summing) matched
+    # sumEvenNumbersStream() purely because sumEvenNumbersStream is a
+    # stream, with ZERO shared identifiers (n/divisor vs numbers/x) and no
+    # operator overlap either. The two REAL stream matches this exemption
+    # was built for both have genuine, if below-threshold, identifier
+    # overlap: joinWordsLoop()/joinWordsStream() share "words",
+    # sumEvenNumbersLoop()/sumEvenNumbersStream() share "numbers". Narrowed
+    # to relax the THRESHOLD for streams (any nonzero overlap is enough,
+    # instead of requiring 0.3) rather than eliminating the requirement
+    # for shared identifiers entirely.
+    if (is_stream1 or is_stream2) and overlap > 0:
+        sufficient_overlap = True
+    # FIX (found live, this session, round 12 -- Scenario 3 GitHub PR test):
+    # firstElement()/firstElementSafe() -- structurally identical in spirit
+    # to lastElement()/lastElementSafe() -- was missing from PR detection
+    # entirely. Traced precisely: firstElement() accesses arr[0] directly
+    # and never references ".length", unlike lastElement() (arr[arr.length
+    # - 1]) which shares "arr" AND "length" with its pair (overlap=0.500).
+    # firstElement()/firstElementSafe() only share "arr" (overlap=0.250),
+    # just under the round-10 threshold of 0.3. Confirmed the worst false
+    # positive still tops out at 0.222, so 0.25 is a real, if narrow
+    # (0.028 margin), gap. Lowered to 0.24. This margin is now tight enough
+    # that further single-statement-body edge cases in this exact shape
+    # (differ only by which literal index/bound is accessed) may keep
+    # surfacing -- flagging this as a known area of residual risk rather
+    # than claiming it's fully closed.
+    if overlap < 0.24 and not sufficient_overlap:
+        print(f"[CloneGuard] No identifier or meaningful operator overlap: {fp1} vs {fp2}, "
+              f"shared_ops={shared_ops} (ubiquitous-only), overlap={overlap:.3f} — skipping")
+        return False, False
+
+    low_confidence = (
+        len(meaningful_shared_ops) < 2
+        and len(shared_rare_ops) >= 1
+        and overlap < 0.24
+    )
+    return True, low_confidence
 
 
 
@@ -876,26 +1060,27 @@ def check_clone():
             # it on body-only text caused it to misfire on stray code
             # inside the body (e.g. matching "new" from "new StringBuilder()"
             # as if it were the return type), silently disabling the gate.
-            if not operations_compatible_shared(chunk, matched["snippet"]):
+            compatible, low_confidence = operations_compatible_shared(chunk, matched["snippet"])
+            if not compatible:
                 continue
 
             struct_score = structural_similarity(extract_body(chunk), extract_body(matched["snippet"]))
             print(f"[CloneGuard] Structural: {struct_score:.4f}")
 
-            # Require minimum structural similarity to avoid false positives
-            # Two completely different functions (like sort vs sum) should not match.
-            # FIX: use an adaptive floor for short functions. A single added
-            # statement (e.g. a null check) swings the token-overlap ratio much
-            # more for a 1-2 statement function than for a longer one, so a flat
-            # 0.15 floor incorrectly rejects legitimate Type 3 near-misses like
-            # isEven() -> isEvenSafe() (adds one null check, same shape, no loop).
-            # operations_compatible_shared() already filters out genuinely
-            # unrelated functions upstream, so relaxing this floor for short
-            # functions is safe.
+            # FIX (found live, this session, via actual server console log):
+            # lastElement() -> lastElementSafe() (guard clause added to a
+            # SINGLE-statement original body) scored struct_score=0.0769 --
+            # just under the 0.08 floor, by a margin of 0.0031. A one-line
+            # original body is even more extreme than the isEven/divideNumbers
+            # cases the 0.08 floor was originally tuned against: adding one
+            # guard clause to a single return statement swings the ratio more
+            # than adding one to a 2-3 statement body. Lowered to 0.07 to
+            # cover this case too, confirmed against real log data rather
+            # than guessed.
             chunk_stmt_count = len(re.findall(r';', extract_body(chunk)))
             matched_stmt_count = len(re.findall(r';', extract_body(matched["snippet"])))
             min_stmt_count = min(chunk_stmt_count, matched_stmt_count)
-            struct_floor = 0.08 if min_stmt_count <= 3 else 0.15
+            struct_floor = 0.07 if min_stmt_count <= 3 else 0.15
             if struct_score < struct_floor:
                 print(f"[CloneGuard] Skipping — structural too low: {struct_score:.4f} (floor={struct_floor})")
                 continue
@@ -929,6 +1114,10 @@ def check_clone():
                     clone_type = "Type 4 — Semantic Clone"
                     severity = "Medium"
                     recommendation = f"Same intent as {matched_name}() but different implementation."
+                if low_confidence:
+                    recommendation = ("⚠️ LOW CONFIDENCE — this match relies on a single coincidental "
+                                       "shared operator with no other supporting evidence; please review "
+                                       "both functions carefully before applying. " + recommendation)
                 best_match = {
                     "isClone": True,
                     "cloneType": clone_type,
@@ -1282,7 +1471,53 @@ def _normalize_type(t):
     return re.sub(r'\s+', '', t or '')
 
 
-def generate_delegation_suggestion(name_a, code_a, name_b, code_b):
+def _resolved_calls_own_name(inner_body, target_name):
+    """True if inner_body contains a call to target_name(...) — a plain
+    text/regex check (mirrors the rest of this file's text-based approach,
+    since the GitHub-bot side has no PSI/AST to resolve calls with, unlike
+    ExtractMethodEngine.java's PsiMethodCallExpression.resolveMethod())."""
+    return bool(re.search(r'\b' + re.escape(target_name) + r'\s*\(', inner_body or ""))
+
+
+def find_compatible_wrapper(name_a, name_b, all_functions, params_b, return_b):
+    """
+    FIX (found live, this session -- Scenario 2 Type 4 test, ported to the
+    Scenario 3/GitHub-bot side for consistency): a semantically-correct
+    Layer 2 match can still have an incompatible signature, because
+    matching happens on BEHAVIOR, not public callability -- e.g.
+    isPrimeIterative(int n) matches isPrimeHelper(int n, int divisor),
+    which contains the real logic but isn't directly delegatable. Search
+    the rest of the file's functions for one that (a) isn't name_a or
+    name_b itself, (b) has a signature compatible with duplicate (params_b/
+    return_b), and (c) already calls name_a somewhere in its body -- i.e.
+    an existing public wrapper around the canonical, like
+    isPrimeRecursive(int n) { return isPrimeHelper(n, 2); }. Mirrors
+    ExtractMethodEngine.java's findCompatibleWrapper() so all three
+    scenarios behave the same way. Returns (wrapper_name, wrapper_sig) or
+    (None, None).
+    """
+    for fn in (all_functions or []):
+        cand_name = fn.get("name", "")
+        if cand_name in (name_a, name_b) or not cand_name:
+            continue
+        cand_sig, cand_inner = _extract_signature_and_body(fn.get("code", ""))
+        if cand_sig is None or cand_inner is None:
+            continue
+        cand_params = _extract_params(cand_sig)
+        cand_return = _extract_return_type(cand_sig)
+        if len(cand_params) != len(params_b):
+            continue
+        if any(_normalize_type(cp["type"]) != _normalize_type(pb["type"])
+               for cp, pb in zip(cand_params, params_b)):
+            continue
+        if _normalize_type(cand_return) != _normalize_type(return_b):
+            continue
+        if _resolved_calls_own_name(cand_inner, name_a):
+            return cand_name, cand_sig
+    return None, None
+
+
+def generate_delegation_suggestion(name_a, code_a, name_b, code_b, all_functions=None):
     """
     Method Delegation: for clones with NO literal shared code (Type 4 --
     same intent, different implementation, e.g. loop vs recursion) but a
@@ -1291,6 +1526,10 @@ def generate_delegation_suggestion(name_a, code_a, name_b, code_b):
     same return type), not shared statements. Rewrites duplicate to simply
     call canonical -- no helper method needed at all, which makes this
     actually simpler to apply than Extract Method.
+
+    all_functions: optional list of {"name", "code"} for every function in
+    the file, used only as a fallback when name_a/name_b don't share a
+    signature directly -- see find_compatible_wrapper().
 
     Returns {"available": True, "technique": "delegation", "newDuplicateBody"}
     or {"available": False, "reason": "..."}.
@@ -1303,46 +1542,94 @@ def generate_delegation_suggestion(name_a, code_a, name_b, code_b):
 
         params_a = _extract_params(sig_a)
         params_b = _extract_params(sig_b)
-        if len(params_a) != len(params_b):
-            return {
-                "available": False,
-                "reason": f"{name_a}() takes {len(params_a)} parameter(s) but {name_b}() "
-                          f"takes {len(params_b)} — delegation needs a matching signature."
-            }
-        for i, (pa, pb) in enumerate(zip(params_a, params_b)):
-            if _normalize_type(pa["type"]) != _normalize_type(pb["type"]):
-                return {
-                    "available": False,
-                    "reason": f"Parameter {i+1} type differs ({pa['type']} vs {pb['type']}) — "
-                              f"delegation needs a matching signature."
-                }
-
         return_a = _extract_return_type(sig_a)
         return_b = _extract_return_type(sig_b)
-        if _normalize_type(return_a) != _normalize_type(return_b):
-            return {
-                "available": False,
-                "reason": f"Return types differ ({return_a} vs {return_b}) — "
-                          f"delegation needs a matching signature."
-            }
 
-        call_args = ", ".join(p["name"] for p in params_b)
-        if _normalize_type(return_b) == "void":
-            new_duplicate_body = f"{sig_b} {{\n    {name_a}({call_args});\n}}"
+        directly_compatible = (
+            len(params_a) == len(params_b)
+            and all(_normalize_type(pa["type"]) == _normalize_type(pb["type"])
+                    for pa, pb in zip(params_a, params_b))
+            and _normalize_type(return_a) == _normalize_type(return_b)
+        )
+
+        delegate_to = name_a
+        via_sibling = False
+        rewrite_name, rewrite_sig, rewrite_params = name_b, sig_b, params_b
+        alone_name = name_a
+
+        # FIX (found live, this session, round 2 -- ported from
+        # ExtractMethodEngine.java's identical fix): the first version of
+        # find_compatible_wrapper only searched for a wrapper AROUND name_a
+        # (canonical), matching name_b's (duplicate's) signature. But which
+        # function is "canonical" vs "duplicate" here is just whichever
+        # order the scan/checklist listed them in -- unrelated to which one
+        # actually has a matching wrapper elsewhere in the file. Try both
+        # directions: first "does something wrap name_a with name_b's
+        # signature" (rewrite name_b), and if that fails, "does something
+        # wrap name_b with name_a's signature" (rewrite name_a instead).
+        # Whichever function already has an existing wrapper depending on
+        # it is left untouched -- this also naturally avoids ever rewriting
+        # a private/recursive worker method that something else relies on.
+        if not directly_compatible:
+            wrapper_name, _ = find_compatible_wrapper(name_a, name_b, all_functions, params_b, return_b)
+            if wrapper_name:
+                delegate_to = wrapper_name
+                via_sibling = True
+            else:
+                reverse_wrapper_name, _ = find_compatible_wrapper(name_b, name_a, all_functions, params_a, return_a)
+                if reverse_wrapper_name:
+                    delegate_to = reverse_wrapper_name
+                    via_sibling = True
+                    rewrite_name, rewrite_sig, rewrite_params = name_a, sig_a, params_a
+                    alone_name = name_b
+                elif len(params_a) != len(params_b):
+                    return {
+                        "available": False,
+                        "reason": f"{name_a}() takes {len(params_a)} parameter(s) but {name_b}() "
+                                  f"takes {len(params_b)} — delegation needs a matching signature, "
+                                  f"and no existing method in this file already wraps either one "
+                                  f"with a compatible signature."
+                    }
+                else:
+                    for i, (pa, pb) in enumerate(zip(params_a, params_b)):
+                        if _normalize_type(pa["type"]) != _normalize_type(pb["type"]):
+                            return {
+                                "available": False,
+                                "reason": f"Parameter {i+1} type differs ({pa['type']} vs {pb['type']}) — "
+                                          f"delegation needs a matching signature, and no existing method "
+                                          f"in this file already wraps either one with a compatible signature."
+                            }
+                    return {
+                        "available": False,
+                        "reason": f"Return types differ ({return_a} vs {return_b}) — "
+                                  f"delegation needs a matching signature, and no existing method "
+                                  f"in this file already wraps either one with a compatible signature."
+                    }
+
+        call_args = ", ".join(p["name"] for p in rewrite_params)
+        if _normalize_type(_extract_return_type(rewrite_sig)) == "void":
+            new_duplicate_body = f"{rewrite_sig} {{\n    {delegate_to}({call_args});\n}}"
         else:
-            new_duplicate_body = f"{sig_b} {{\n    return {name_a}({call_args});\n}}"
+            new_duplicate_body = f"{rewrite_sig} {{\n    return {delegate_to}({call_args});\n}}"
 
-        return {
+        result = {
             "available": True,
             "technique": "delegation",
-            "delegatesTo": name_a,
+            "delegatesTo": delegate_to,
+            "rewrites": rewrite_name,
             "newDuplicateBody": new_duplicate_body,
         }
+        if via_sibling:
+            result["viaSibling"] = True
+            result["note"] = (f"{alone_name}() has the shared logic but an incompatible signature; "
+                               f"delegated through {delegate_to}(), which already wraps {alone_name}() "
+                               f"with a matching signature.")
+        return result
     except Exception as e:
         return {"available": False, "reason": f"Delegation check failed: {e}"}
 
 
-def generate_extract_suggestion(name_a, code_a, name_b, code_b):
+def generate_extract_suggestion(name_a, code_a, name_b, code_b, all_functions=None):
     """
     canonical = (name_a, code_a), duplicate = (name_b, code_b).
     Tries Extract Method first (needs a literal shared statement block).
@@ -1350,6 +1637,10 @@ def generate_extract_suggestion(name_a, code_a, name_b, code_b):
     back to Method Delegation (needs only a compatible signature, not
     shared code). Returns a dict with "technique": "extract" | "delegation"
     on success, so callers (the CI workflow) know which shape of fix to post.
+
+    all_functions: optional list of {"name", "code"} for every function in
+    the file -- passed straight through to generate_delegation_suggestion's
+    sibling-wrapper search. See find_compatible_wrapper().
     """
     try:
         sig_a, inner_a = _extract_signature_and_body(code_a)
@@ -1363,11 +1654,67 @@ def generate_extract_suggestion(name_a, code_a, name_b, code_b):
             return {"available": False, "reason": "Method body too short to extract."}
 
         block = _find_longest_common_contiguous_block(stmts_a, stmts_b)
+
+        # NOTE (this session, Scenario 3 PR test): single-statement
+        # extraction was tried and reverted here. firstElement()/
+        # lastElement()-style pairs (whose only shared logic is genuinely
+        # one statement) fail to extract as a result and correctly report
+        # "insufficient shared code" -- a safe refusal, not a bug. The
+        # attempt was reverted because it's unsafe for more than just
+        # obviously-trivial statements: a guard clause with an early
+        # return ("if (n < 2) return 0;"), extracted alone, silently
+        # breaks control flow by discarding the helper's return value.
+        # That was discovered by testing the fix against a real pair
+        # (isPrimeIterative()/isPrimeHelper()), not guessed. Given repeated
+        # evidence that narrowing this exception keeps surfacing new
+        # correctness risks one level deeper, requiring block length >= 2
+        # unconditionally prioritizes never-silently-corrupt over maximum
+        # detection coverage.
         if block is None or block[2] < 2:
             # No literal shared fragment -- Extract Method has nothing to
             # work with by definition (this is the Type 4 case). Try
             # delegation instead before giving up entirely.
-            delegation = generate_delegation_suggestion(name_a, code_a, name_b, code_b)
+            #
+            # FIX (found live, this session, Scenario 3 PR test -- CRITICAL):
+            # confirmed via direct testing that falling back to delegation
+            # unconditionally here is genuinely dangerous, not just
+            # imprecise. coreSumValues()/sumEvenNumbersLoop() -- two
+            # unrelated functions that merely share ".length" and "total"
+            # as generic loop/accumulator tokens -- passed
+            # operations_compatible_shared() (identifier overlap 0.333,
+            # HIGHER than some real matches) and, once extraction correctly
+            # found no real shared block, fell through to delegation, which
+            # "succeeded" purely because the signatures matched --
+            # producing sumEvenNumbersLoop() { return coreSumValues(numbers); },
+            # silently deleting its even-number filter. Identifier overlap
+            # alone is not reliable enough evidence to authorize something
+            # that can silently change behavior. Require operator-level
+            # evidence instead (matching the RARE_OPS/meaningful-ops logic
+            # operations_compatible_shared already uses) before allowing
+            # the delegation fallback specifically -- this still lets real
+            # cases like isPrimeIterative()/isPrimeHelper() through (they
+            # share the rare '%' operator), while blocking identifier-only
+            # coincidences from ever reaching an auto-applied rewrite.
+            fp_a = operator_fingerprint_shared(code_a)
+            fp_b = operator_fingerprint_shared(code_b)
+            shared_fp = fp_a & fp_b
+            RARE_OPS_LOCAL = {'/', '%'}
+            UBIQUITOUS_OPS_LOCAL = {'+', '-', '*', '<', '>', '=='}
+            meaningful_shared_fp = shared_fp - UBIQUITOUS_OPS_LOCAL
+            has_operator_evidence = (
+                len(shared_fp & RARE_OPS_LOCAL) >= 1 or len(meaningful_shared_fp) >= 2
+            )
+            if not has_operator_evidence:
+                return {
+                    "available": False,
+                    "reason": "No shared code fragment found, and the only supporting "
+                              "evidence for a possible relationship is generic identifier "
+                              "overlap (e.g. common loop/accumulator variable names) with "
+                              "no shared distinctive operators — too weak to safely "
+                              "auto-apply a delegation. This pair should be reviewed "
+                              "manually rather than auto-refactored."
+                }
+            delegation = generate_delegation_suggestion(name_a, code_a, name_b, code_b, all_functions)
             if delegation.get("available"):
                 return delegation
             return {
@@ -1743,7 +2090,21 @@ def scan_file():
             if pair_key in seen_pairs:
                 continue
 
-            if fn_i["name"] in layer1_names and fn_j["name"] in layer1_names:
+            # FIX (found live, this session -- rigorous multi-function scan
+            # test): this previously only skipped a pair when BOTH sides
+            # were already claimed at Layer 1 -- but a function fully
+            # consumed by its Layer 1 match (e.g. sumValues, already paired
+            # exactly with sumValuesExact as a Type 1 clone) has no business
+            # being independently re-matched against some THIRD, unrelated
+            # function at Layer 2 just because that third function itself
+            # wasn't Layer-1-claimed. Confirmed live: this exact gap is what
+            # let sumValues (already claimed by its Type 1 match) get
+            # re-flagged against sumDigitsIterative, and sumValuesExact
+            # against reverseArrayRecursive -- neither pairing has anything
+            # to do with each other. A function claimed at Layer 1 must be
+            # fully off the table for Layer 2, not just when its ORIGINAL
+            # partner is also involved.
+            if fn_i["name"] in layer1_names or fn_j["name"] in layer1_names:
                 continue
 
             if fn_i["name"] in layer2_claimed or fn_j["name"] in layer2_claimed:
@@ -1768,8 +2129,9 @@ def scan_file():
             if semantic_score < 0.90:
                 continue
 
-            if not operations_compatible_shared(fn_i["snippet"], fn_j["snippet"],
-                                                 name1=fn_i["name"], name2=fn_j["name"]):
+            compatible, low_confidence = operations_compatible_shared(
+                fn_i["snippet"], fn_j["snippet"], name1=fn_i["name"], name2=fn_j["name"])
+            if not compatible:
                 continue
 
             pos_score = structural_similarity(
@@ -1797,7 +2159,7 @@ def scan_file():
             stmts_i = len(re.findall(r';', extract_body_local(fn_i["snippet"])))
             stmts_j = len(re.findall(r';', extract_body_local(fn_j["snippet"])))
             min_stmts = min(stmts_i, stmts_j)
-            struct_floor = 0.08 if min_stmts <= 3 else 0.15
+            struct_floor = 0.07 if min_stmts <= 3 else 0.15
             if struct_score < struct_floor:
                 continue
 
@@ -1825,6 +2187,12 @@ def scan_file():
                 severity = "Medium"
                 rec = f"{fn_j['name']}() has same intent as {fn_i['name']}() but different implementation."
 
+            if low_confidence:
+                rec = ("⚠️ LOW CONFIDENCE — this match relies on a single coincidental shared "
+                       "operator with no other supporting evidence (no shared identifiers, no "
+                       "additional operator overlap); please review both functions carefully "
+                       "before applying. " + rec)
+
             clone_groups.append({
                 "cloneType": clone_type,
                 "similarity": f"{round(semantic_score * 100)}%",
@@ -1834,6 +2202,7 @@ def scan_file():
                 "detectionLayer": "Layer 2 (Server — CodeBERT+FAISS)",
                 "severity": severity,
                 "recommendation": rec,
+                "lowConfidence": low_confidence,
             })
             if same_shape:
                 clone_groups[-1]["suggestion"] = generate_extract_suggestion(
@@ -1875,10 +2244,15 @@ def suggest_single_pair():
     data = request.get_json(force=True) or {}
     name_a, code_a = data.get("nameA", ""), data.get("codeA", "")
     name_b, code_b = data.get("nameB", ""), data.get("codeB", "")
+    # Optional: every function in the file, used only as a fallback to find
+    # an existing signature-compatible wrapper when name_a/name_b don't
+    # share a signature directly (see find_compatible_wrapper()). Absent
+    # for older callers -- that's fine, it just disables the fallback.
+    all_functions = data.get("allFunctions")
     if not all([name_a, code_a, name_b, code_b]):
         return jsonify({"available": False, "reason": "Missing nameA/codeA/nameB/codeB"}), 400
     try:
-        suggestion = generate_extract_suggestion(name_a, code_a, name_b, code_b)
+        suggestion = generate_extract_suggestion(name_a, code_a, name_b, code_b, all_functions)
     except Exception as e:
         suggestion = {"available": False, "reason": f"Suggestion failed: {e}"}
     return jsonify(suggestion)
