@@ -174,9 +174,11 @@ jobs:
                       continue
 
                   try:
+                      all_functions = [{"name": fn["name"], "code": fn["code"]} for fn in by_name.values()]
                       payload = json.dumps({
                           "nameA": name_a, "codeA": fn_a["code"],
-                          "nameB": name_b, "codeB": fn_b["code"]
+                          "nameB": name_b, "codeB": fn_b["code"],
+                          "allFunctions": all_functions
                       }).encode()
                       req = urllib.request.Request(
                           f"{CLONEGUARD_URL}/suggest", data=payload,
@@ -193,7 +195,9 @@ jobs:
                       continue
 
                   if suggestion.get("technique") == "delegation":
-                      edits.append((fn_b["start"], fn_b["end"], suggestion["newDuplicateBody"]))
+                      rewritten_name = suggestion.get("rewrites", name_b)
+                      target_fn = fn_a if rewritten_name == name_a else fn_b
+                      edits.append((target_fn["start"], target_fn["end"], suggestion["newDuplicateBody"]))
                   else:
                       edits.append((fn_a["start"], fn_a["end"], suggestion["newCanonicalBody"]))
                       edits.append((fn_b["start"], fn_b["end"],
@@ -201,7 +205,7 @@ jobs:
 
                   claimed.add(name_a)
                   claimed.add(name_b)
-                  applied.append((idx, name_a, name_b, suggestion.get("technique", "extract")))
+                  applied.append((idx, name_a, name_b, suggestion.get("technique", "extract"), suggestion.get("note")))
 
               if edits:
                   edits.sort(key=lambda e: e[0], reverse=True)
@@ -228,9 +232,11 @@ jobs:
           subprocess.run(["git", "push"], check=True)
 
           body = f"**CloneGuard** — applied {len(applied)} refactor(s):\n\n"
-          for idx, a, b, tech in applied:
+          for idx, a, b, tech, note in applied:
               label = "Method Delegation" if tech == "delegation" else "Extract Method"
               body += f"- ✅ #{idx} `{a}()` ↔ `{b}()` ({label})\n"
+              if note:
+                  body += f"  - ℹ️ {note}\n"
           if skipped:
               body += "\nSkipped:\n"
               for idx, a, b, reason in skipped:

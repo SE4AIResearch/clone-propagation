@@ -338,6 +338,42 @@ public class ExtractMethodEngine {
 
         int[] run = findLongestCommonContiguousBlock(canonicalStmts, duplicateStmts);
 
+        // FIX (found live, this session -- Scenario 2 final check, post-
+        // refactor rescan): confirmed via live evidence that a matched
+        // block of length 1 was being extracted just like any other --
+        // specifically, sumEvenNumbersLoop() and a newly-created helper
+        // both happened to start with the identical single TRIVIAL
+        // statement "int total = 0;", and this coincidence alone was
+        // enough to trigger a nonsensical extraction linking two
+        // completely unrelated functions.
+        //
+        // FIX (found live, this session, round 2 -- corrects an
+        // over-broad first attempt): blocking EVERY length-1 match was
+        // wrong -- confirmed live it also broke lastElement()/
+        // lastElementSafe(), a genuinely real Type 3 match whose entire
+        // shared logic legitimately IS a single statement
+        // ("return arr[arr.length - 1];"). Block length alone can't
+        // distinguish "coincidental trivial statement" from "real logic
+        // that happens to be one line" -- same category of mistake made
+        // several times tonight on the server side, just resurfacing
+        // here. The actual distinguishing feature is TRIVIALITY of the
+        // statement's content, not its count: only reject a length-1
+        // match when that one statement is a bare declaration assigning
+        // a plain literal (e.g. "int total = 0;", "boolean found = false;")
+        // -- nothing there to genuinely "extract" as shared behavior.
+        // A statement doing real work (array indexing, a computed
+        // expression, a meaningful return) still counts even alone.
+        if (run != null && run[2] == 1) {
+            String soleMatchedStmtText = canonicalStmts[run[0]].getText().trim();
+            boolean isTrivialLiteralDeclaration = Pattern.compile(
+                    "^(?:int|long|double|float|boolean|char|byte|short|String)\\s+\\w+\\s*=\\s*" +
+                    "(?:0|0\\.0|0f|0L|false|true|null|\"\")\\s*;?$"
+            ).matcher(soleMatchedStmtText).matches();
+            if (isTrivialLiteralDeclaration) {
+                run = null;
+            }
+        }
+
         // Safety measure #3: nothing shared to extract (genuine Type 4 case,
         // OR canonical was already refactored elsewhere -- see below)
         if (run == null || run[2] == 0) {
@@ -970,53 +1006,149 @@ public class ExtractMethodEngine {
         // matching contract.
         PsiParameter[] canonicalParams = canonicalMethod.getParameterList().getParameters();
         PsiParameter[] duplicateParams = duplicateMethod.getParameterList().getParameters();
-        if (canonicalParams.length != duplicateParams.length) {
-            return DelegationPlan.abort("CloneGuard — Cannot Delegate Safely",
-                    canonical + "() and " + duplicate + "() take a different number of parameters — " +
-                    "delegation needs a matching signature. No changes were made.",
-                    JOptionPane.WARNING_MESSAGE);
-        }
-        for (int i = 0; i < canonicalParams.length; i++) {
-            if (!canonicalParams[i].getType().equals(duplicateParams[i].getType())) {
-                return DelegationPlan.abort("CloneGuard — Cannot Delegate Safely",
-                        "Parameter " + (i + 1) + " type differs between " + canonical + "() and " + duplicate +
-                        "() — delegation needs a matching signature. No changes were made.",
-                        JOptionPane.WARNING_MESSAGE);
-            }
-        }
         PsiType canonicalReturn = canonicalMethod.getReturnType();
         PsiType duplicateReturn = duplicateMethod.getReturnType();
-        if (canonicalReturn == null || duplicateReturn == null || !canonicalReturn.equals(duplicateReturn)) {
-            return DelegationPlan.abort("CloneGuard — Cannot Delegate Safely",
-                    "Return types differ between " + canonical + "() and " + duplicate + "() — " +
-                    "delegation needs a matching signature. No changes were made.",
-                    JOptionPane.WARNING_MESSAGE);
+
+        boolean directlyCompatible = signaturesCompatible(canonicalParams, canonicalReturn, duplicateParams, duplicateReturn);
+
+        // RESTORED (this fix was present earlier this session but got
+        // dropped when this file was later rebuilt from an older uploaded
+        // copy that predated it -- confirmed live: isPrimeIterative()/
+        // isPrimeHelper() started refusing again with the old, pre-wrapper-
+        // search error message). A semantically-correct match can still
+        // have an incompatible signature, because Layer 2 matches on
+        // BEHAVIOR, not public callability. Search the same class for a
+        // sibling method that already calls one of the two matched methods
+        // and has a signature compatible with the OTHER one -- an existing
+        // public wrapper around the real logic (e.g. isPrimeRecursive(int n)
+        // { return isPrimeHelper(n, 2); }). Try both directions: first
+        // "does something wrap canonical with duplicate's signature", and
+        // if that fails, "does something wrap duplicate with canonical's
+        // signature" instead -- whichever of the two methods already has
+        // an existing wrapper is left untouched; the other is redirected
+        // through it.
+        PsiMethod methodToRewrite = duplicateMethod;
+        PsiMethod methodLeftAlone = canonicalMethod;
+        PsiMethod delegationTarget = canonicalMethod;
+        boolean viaSibling = false;
+        if (!directlyCompatible) {
+            PsiMethod sibling = findCompatibleWrapper(canonicalClass, canonicalMethod, duplicateMethod, duplicateParams, duplicateReturn);
+            if (sibling != null) {
+                delegationTarget = sibling;
+                viaSibling = true;
+            } else {
+                PsiMethod reverseSibling = findCompatibleWrapper(canonicalClass, duplicateMethod, canonicalMethod, canonicalParams, canonicalReturn);
+                if (reverseSibling != null) {
+                    methodToRewrite = canonicalMethod;
+                    methodLeftAlone = duplicateMethod;
+                    delegationTarget = reverseSibling;
+                    viaSibling = true;
+                } else {
+                    if (canonicalParams.length != duplicateParams.length) {
+                        return DelegationPlan.abort("CloneGuard — Cannot Delegate Safely",
+                                canonical + "() and " + duplicate + "() take a different number of parameters — " +
+                                "delegation needs a matching signature, and no existing method in this class " +
+                                "already wraps either one with a compatible signature. No changes were made.",
+                                JOptionPane.WARNING_MESSAGE);
+                    }
+                    for (int i = 0; i < canonicalParams.length; i++) {
+                        if (!canonicalParams[i].getType().equals(duplicateParams[i].getType())) {
+                            return DelegationPlan.abort("CloneGuard — Cannot Delegate Safely",
+                                    "Parameter " + (i + 1) + " type differs between " + canonical + "() and " + duplicate +
+                                    "() — delegation needs a matching signature, and no existing method in this class " +
+                                    "already wraps either one with a compatible signature. No changes were made.",
+                                    JOptionPane.WARNING_MESSAGE);
+                        }
+                    }
+                    return DelegationPlan.abort("CloneGuard — Cannot Delegate Safely",
+                            "Return types differ between " + canonical + "() and " + duplicate + "() — " +
+                            "delegation needs a matching signature, and no existing method in this class " +
+                            "already wraps either one with a compatible signature. No changes were made.",
+                            JOptionPane.WARNING_MESSAGE);
+                }
+            }
         }
 
-        String callArgsText = Arrays.stream(duplicateParams)
+        String rewriteName = methodToRewrite.getName();
+        String aloneName = methodLeftAlone.getName();
+        PsiParameter[] rewriteParams = methodToRewrite.getParameterList().getParameters();
+        String targetName = delegationTarget.getName();
+        PsiType targetReturn = delegationTarget.getReturnType();
+        String callArgsText = Arrays.stream(rewriteParams)
                 .map(PsiParameter::getName).reduce((a, b) -> a + ", " + b).orElse("");
-        boolean isVoid = "void".equals(canonicalReturn.getPresentableText());
+        boolean isVoid = targetReturn != null && "void".equals(targetReturn.getPresentableText());
         String callLine = isVoid
-                ? canonical + "(" + callArgsText + ");"
-                : "return " + canonical + "(" + callArgsText + ");";
+                ? targetName + "(" + callArgsText + ");"
+                : "return " + targetName + "(" + callArgsText + ");";
 
-        String confirmMessage =
-                "CloneGuard found a " + cloneTypeLabel + ":\n\n" +
-                "  Canonical:  " + canonical + "()\n" +
-                "  Duplicate:  " + duplicate + "()\n\n" +
-                "No literal code is shared here (expected for Type 4 semantic clones — same intent, " +
-                "different implementation), but both methods have a compatible signature.\n\n" +
-                "Proposed refactoring (Method Delegation):\n" +
-                "  • " + duplicate + "() will simply call " + canonical + "() directly\n" +
-                "  • " + canonical + "() is left completely unchanged\n\n" +
-                "Apply this refactoring now?";
+        String confirmMessage = viaSibling
+                ? "CloneGuard found a " + cloneTypeLabel + ":\n\n" +
+                  "  " + canonical + "()  ↔  " + duplicate + "()\n\n" +
+                  aloneName + "() has the shared logic but its signature doesn't match " + rewriteName + "(). " +
+                  "However, " + targetName + "() in this class already calls " + aloneName + "() with a " +
+                  "signature that matches " + rewriteName + "() exactly.\n\n" +
+                  "Proposed refactoring (Method Delegation, via existing wrapper):\n" +
+                  "  • " + rewriteName + "() will call " + targetName + "() directly\n" +
+                  "  • " + aloneName + "() and " + targetName + "() are left completely unchanged\n\n" +
+                  "Apply this refactoring now?"
+                : "CloneGuard found a " + cloneTypeLabel + ":\n\n" +
+                  "  Canonical:  " + canonical + "()\n" +
+                  "  Duplicate:  " + duplicate + "()\n\n" +
+                  "No literal code is shared here (expected for Type 4 semantic clones — same intent, " +
+                  "different implementation), but both methods have a compatible signature.\n\n" +
+                  "Proposed refactoring (Method Delegation):\n" +
+                  "  • " + duplicate + "() will simply call " + canonical + "() directly\n" +
+                  "  • " + canonical + "() is left completely unchanged\n\n" +
+                  "Apply this refactoring now?";
 
         DelegationPlan plan = new DelegationPlan();
         plan.aborted = false;
-        plan.duplicateMethod = duplicateMethod;
+        plan.duplicateMethod = methodToRewrite;
         plan.confirmMessage = confirmMessage;
         plan.newDuplicateBodyText = "{\n" + callLine + "\n}";
         return plan;
+    }
+
+    /**
+     * True if two signatures (params positionally + return type) match
+     * exactly. Extracted so both the direct-compatibility check and the
+     * sibling-wrapper search share one definition of "compatible".
+     */
+    private boolean signaturesCompatible(PsiParameter[] paramsA, PsiType returnA, PsiParameter[] paramsB, PsiType returnB) {
+        if (paramsA.length != paramsB.length) return false;
+        for (int i = 0; i < paramsA.length; i++) {
+            if (!paramsA[i].getType().equals(paramsB[i].getType())) return false;
+        }
+        return returnA != null && returnB != null && returnA.equals(returnB);
+    }
+
+    /**
+     * Searches the containing class for a method that (a) is not the
+     * canonical or duplicate itself, (b) has a signature compatible with
+     * duplicateParams/duplicateReturn, and (c) actually calls
+     * canonicalMethod somewhere in its body. This is the "existing public
+     * wrapper" pattern -- e.g. isPrimeRecursive(int n) wrapping
+     * isPrimeHelper(int n, int divisor) by seeding divisor=2. Returns null
+     * if no such method exists.
+     */
+    private PsiMethod findCompatibleWrapper(PsiClass containingClass, PsiMethod canonicalMethod, PsiMethod duplicateMethod,
+                                             PsiParameter[] duplicateParams, PsiType duplicateReturn) {
+        for (PsiMethod candidate : containingClass.getMethods()) {
+            if (candidate.equals(canonicalMethod) || candidate.equals(duplicateMethod)) continue;
+            PsiParameter[] candidateParams = candidate.getParameterList().getParameters();
+            PsiType candidateReturn = candidate.getReturnType();
+            if (!signaturesCompatible(candidateParams, candidateReturn, duplicateParams, duplicateReturn)) continue;
+
+            PsiCodeBlock body = candidate.getBody();
+            if (body == null) continue;
+            boolean callsCanonical = PsiTreeUtil.findChildrenOfType(body, PsiMethodCallExpression.class).stream()
+                    .anyMatch(call -> {
+                        PsiMethod resolved = call.resolveMethod();
+                        return resolved != null && resolved.equals(canonicalMethod);
+                    });
+            if (callsCanonical) return candidate;
+        }
+        return null;
     }
 
     // ── Longest common CONTIGUOUS block of statements (windowed structural
