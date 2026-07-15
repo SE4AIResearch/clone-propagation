@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import os
 import re
+import threading
 
 # Reduce native crashes on macOS when PyTorch/FAISS run together
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -31,9 +32,109 @@ ai_model = RobertaModel.from_pretrained("microsoft/unixcoder-base")
 ai_model.eval()
 print("[CloneGuard] UniXcoder ready.")
 
+class IndexStore:
+    """
+    Thread-safe wrapper around the FAISS index and its parallel
+    stored_functions list.
+
+    These two structures must stay in sync by position -- faiss_index
+    vector i corresponds to stored_functions[i]. Without synchronization,
+    a write racing another write (or a write racing a read) could
+    interleave in a way that desyncs them, causing an IndexError or,
+    worse, a search silently returning the wrong stored function for a
+    given match index.
+
+    server.py currently runs with threaded=False, so this isn't an
+    active bug today -- but any future deployment behind a
+    multi-threaded WSGI server (e.g. Gunicorn with multiple worker
+    threads) would hit this immediately. Encapsulating the state here,
+    with one lock guarding every read and write, makes that deployment
+    change safe without requiring any changes to the route handlers
+    that use it.
+
+    Deliberate design choice: get_embedding() (model inference, the
+    expensive part of indexing) is always called OUTSIDE the lock, by
+    the caller, before add_if_not_duplicate() is invoked. Holding the
+    lock during model inference would serialize every request on their
+    single slowest step, defeating the purpose of a multi-threaded
+    deployment. The tradeoff is that a duplicate's embedding gets
+    computed even though it's about to be discarded -- acceptable,
+    since duplicates are the exception rather than the common case.
+    """
+
+    def __init__(self, dim):
+        self._dim = dim
+        self._lock = threading.Lock()
+        self._faiss_index = faiss.IndexFlatIP(dim)
+        self._stored_functions = []
+
+    def reset(self):
+        with self._lock:
+            self._faiss_index = faiss.IndexFlatIP(self._dim)
+            self._stored_functions = []
+
+    @property
+    def ntotal(self):
+        with self._lock:
+            return self._faiss_index.ntotal
+
+    def name_hint_index(self):
+        """Current count, used as a naming-fallback hint by extract_function_name()."""
+        with self._lock:
+            return len(self._stored_functions)
+
+    def add_if_not_duplicate(self, code, embedding, fn_name):
+        """
+        Atomically check-and-add. Re-checks for a duplicate INSIDE the
+        lock, not just before this method is called -- this is what
+        actually closes the race: two concurrent requests could both
+        pass an outer "not a duplicate" check before either has added
+        its entry, unless the check and the add happen under the same
+        lock acquisition. Returns True if the entry was added, False if
+        it was skipped as a duplicate.
+        """
+        chunk_body = normalize_body(code)
+        with self._lock:
+            already_exists = any(
+                normalize_body(f["snippet"]) == chunk_body for f in self._stored_functions
+            )
+            if already_exists:
+                return False
+            self._faiss_index.add(np.array([embedding]))
+            self._stored_functions.append({
+                "name": fn_name,
+                "snippet": code,
+                "preview": code[:80] + "..."
+            })
+            return True
+
+    def search_with_snapshot(self, query, k=None):
+        """
+        Runs the FAISS search and copies out exactly the stored_functions
+        entries the caller will need, all under one lock acquisition --
+        so the caller can never see a result set where the FAISS side
+        and the stored_functions side reflect two different points in
+        time. k=None means "search everything currently indexed".
+        Returns (distances, indices, entries), where entries[idx] is a
+        stored function dict for each idx present in the search
+        results. Returns (None, None, {}) if the index is empty.
+        """
+        with self._lock:
+            current_total = self._faiss_index.ntotal
+            actual_k = current_total if k is None else min(k, current_total)
+            if actual_k < 1:
+                return None, None, {}
+            distances, indices = self._faiss_index.search(query, actual_k)
+            entries = {}
+            for idx in indices[0]:
+                idx = int(idx)
+                if 0 <= idx < len(self._stored_functions):
+                    entries[idx] = self._stored_functions[idx]
+            return distances, indices, entries
+
+
 EMBEDDING_DIM = 768
-faiss_index = faiss.IndexFlatIP(EMBEDDING_DIM)
-stored_functions = []
+index_store = IndexStore(EMBEDDING_DIM)
 
 
 def is_java_method(code):
@@ -195,6 +296,110 @@ def structural_similarity(code1, code2):
     return score
 
 
+def bag_of_keywords(code):
+    """Keyword frequency bag — order-independent, works for any size snippet."""
+    keywords = {
+        "public","private","protected","static","final","void","int","long",
+        "double","float","boolean","char","byte","short","return","if","else",
+        "for","while","do","switch","case","break","continue","try","catch",
+        "throw","throws","new","null","true","false","this","super","instanceof"
+    }
+    code = re.sub(r"//[^\n]*", "", code)
+    code = re.sub(r"/\*[\s\S]*?\*/", "", code)
+    tokens = re.findall(r"\b[a-zA-Z_]\w*\b", code)
+    bag = {}
+    for t in tokens:
+        if t in keywords:
+            bag[t] = bag.get(t, 0) + 1
+    return bag
+
+
+def bag_similarity(code1, code2):
+    """
+    Order-independent structural signal (Jaccard over keyword multisets).
+
+    FIX (professor-flagged): structural_similarity() above compares
+    tokens positionally (tokens1[i] == tokens2[i]), which is fragile to
+    any reordering of independent statements -- two declarations
+    swapped, or a guard clause inserted before existing logic, shifts
+    every token after that point out of positional alignment even
+    though nothing about the code's actual shape changed. This function
+    was previously nested only inside the /scan route handler, where
+    struct_score = max(pos_score, bag_score) already combines the two;
+    /check had no equivalent and relied on the position-sensitive score
+    alone. Promoted to module level so both endpoints can share it,
+    matching the "shared cross-endpoint" pattern already used for
+    operations_compatible_shared() and get_return_type_shared() above.
+    """
+    b1 = bag_of_keywords(code1)
+    b2 = bag_of_keywords(code2)
+    if not b1 or not b2:
+        return 0.0
+    keys = set(b1) | set(b2)
+    intersection = sum(min(b1.get(k, 0), b2.get(k, 0)) for k in keys)
+    union = sum(max(b1.get(k, 0), b2.get(k, 0)) for k in keys)
+    score = intersection / union if union > 0 else 0.0
+    return score
+
+
+def _strip_loop_and_try_headers(code):
+    """
+    Replaces the contents of every for(...) and try(...) header with an
+    empty parenthesis pair, leaving the loop/try body untouched. Uses
+    paren-depth tracking so a nested call inside the header (e.g.
+    "for (int i = 0; i < arr.length(); i++)") is still handled correctly,
+    not just a naive first-close-paren match.
+    """
+    result = []
+    pattern = re.compile(r'\b(for|try)\s*\(')
+    last_end = 0
+    for m in pattern.finditer(code):
+        result.append(code[last_end:m.end()])  # keep "for(" / "try("
+        depth = 1
+        i = m.end()
+        while i < len(code) and depth > 0:
+            c = code[i]
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+            i += 1
+        result.append(")")  # header content dropped, closing paren kept
+        last_end = i
+    result.append(code[last_end:])
+    return "".join(result)
+
+
+def count_statements(code):
+    """
+    FIX (professor-flagged, 3.3): counting every raw ';' character as a
+    statement inflates the count for a for-loop header by up to 2 (the
+    init and condition semicolons in "for (int i = 0; i < n; i++)")
+    relative to an otherwise-equivalent while-loop, and inflates
+    try-with-resources similarly when declaring multiple resources. A
+    semicolon inside a string literal was also miscounted as a statement
+    terminator. This mirrors the equivalent fix in CloneIndexService.java
+    (Java client side): strip for(...)/try(...) header contents and
+    string/comment content before counting, so only semicolons that
+    actually terminate a real statement are counted.
+
+    This does NOT implement the professor's stronger recommendation --
+    using IntelliJ's PSI to count actual AST statement nodes on the
+    client side and passing that count to the server as request
+    metadata, which would be more precise but requires changes to the
+    request payload contract shared with PythonServerClient.java, not
+    attempted here. Tracked as a follow-up.
+    """
+    if not code:
+        return 0
+    cleaned = re.sub(r"//[^\n]*", "", code)
+    cleaned = re.sub(r"/\*[\s\S]*?\*/", "", cleaned)
+    cleaned = re.sub(r'"(?:[^"\\]|\\.)*"', '""', cleaned)
+    cleaned = re.sub(r"'(?:[^'\\]|\\.)'", "''", cleaned)
+    cleaned = _strip_loop_and_try_headers(cleaned)
+    return cleaned.count(';')
+
+
 def extract_function_name(code, index):
     # Excluded names — Java types, classes, keywords that aren't method names
     excluded = {
@@ -252,9 +457,30 @@ def get_return_type_shared(code):
     stripped = code.strip()
     if stripped.startswith("{"):
         return "unknown"
+
+    # FIX (found live, this session — Scenario 2 rescan): comments were
+    # never stripped before running the regex below. A comment sitting
+    # directly above a method — e.g. "// ── Type 4: Semantic Clone (loop
+    # vs recursion, needs wrapper) ──" immediately followed by
+    # "public int isPrimeIterative(int n) {" — got misread as the
+    # signature itself: "Semantic" was captured as the return type and
+    # "Clone" as the method name, with the "(" from "(loop" in the
+    # comment satisfying the regex's parenthesis requirement, before the
+    # regex ever reached the real signature line. Confirmed directly
+    # against the exact code the plugin sent during a live /scan: this
+    # silently rejected isPrimeIterative()/isPrimeHelper() — a genuine
+    # Type 4 match that had worked correctly in every prior test
+    # tonight, none of which happened to include a comment immediately
+    # preceding the method. Stripping comments first, the same
+    # preprocessing already applied elsewhere in this file
+    # (bag_of_keywords, structural_similarity's normalize()), closes
+    # this.
+    code_no_comments = re.sub(r"//[^\n]*", "", code)
+    code_no_comments = re.sub(r"/\*[\s\S]*?\*/", "", code_no_comments)
+
     match = re.search(
         r'(?:public|private|protected|static|final|\s)+\s*(void|int|long|double|float|boolean|String|\w+)\s+\w+\s*\(',
-        code
+        code_no_comments
     )
     return match.group(1) if match else "unknown"
 
@@ -838,7 +1064,6 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
 
 @app.route("/index", methods=["POST"])
 def build_index():
-    global faiss_index, stored_functions
     data = request.get_json()
     code = data.get("code", "")
     fn_name_hint = data.get("name", "")
@@ -846,8 +1071,7 @@ def build_index():
 
     # Handle reset-only call (empty file saved)
     if reset:
-        faiss_index = faiss.IndexFlatIP(EMBEDDING_DIM)
-        stored_functions = []
+        index_store.reset()
         print("[CloneGuard] Index reset — file cleared.")
         return jsonify({"ok": True, "indexed": 0, "message": "Index cleared"})
 
@@ -860,47 +1084,31 @@ def build_index():
     # Don't re-chunk it, that causes for-loops to be indexed separately
     if code.startswith('{'):
         # Try to extract name from body content, fall back to hint or index
-        fn_name = fn_name_hint if fn_name_hint else extract_function_name(code, len(stored_functions))
-        chunk_body = normalize_body(code)
-        already_exists = any(normalize_body(f["snippet"]) == chunk_body for f in stored_functions)
-        if already_exists:
-            print(f"[CloneGuard] Skipping duplicate: {fn_name}")
-        else:
-            embedding = get_embedding(code)
-            faiss_index.add(np.array([embedding]))
-            stored_functions.append({
-                "name": fn_name,
-                "snippet": code,
-                "preview": code[:80] + "..."
-            })
+        fn_name = fn_name_hint if fn_name_hint else extract_function_name(code, index_store.name_hint_index())
+        embedding = get_embedding(code)
+        added = index_store.add_if_not_duplicate(code, embedding, fn_name)
+        if added:
             print(f"[CloneGuard] Indexed: {fn_name}")
-        print(f"[CloneGuard] FAISS index total: {faiss_index.ntotal} vectors")
-        return jsonify({"ok": True, "indexed": faiss_index.ntotal})
+        else:
+            print(f"[CloneGuard] Skipping duplicate: {fn_name}")
+        print(f"[CloneGuard] FAISS index total: {index_store.ntotal} vectors")
+        return jsonify({"ok": True, "indexed": index_store.ntotal})
 
     # Full method or file — chunk normally
     chunks = chunk_into_functions(code)
     print(f"[CloneGuard] chunk count={len(chunks)}, name_hint='{fn_name_hint}', code_start='{code[:50]}'")
 
     for i, chunk in enumerate(chunks):
-        chunk_body = normalize_body(chunk)
-        fn_name = fn_name_hint if fn_name_hint and i == 0 else extract_function_name(chunk, len(stored_functions))
-
-        already_exists = any(normalize_body(f["snippet"]) == chunk_body for f in stored_functions)
-        if already_exists:
-            print(f"[CloneGuard] Skipping duplicate: {fn_name}")
-            continue
-
+        fn_name = fn_name_hint if fn_name_hint and i == 0 else extract_function_name(chunk, index_store.name_hint_index())
         embedding = get_embedding(chunk)
-        faiss_index.add(np.array([embedding]))
-        stored_functions.append({
-            "name": fn_name,
-            "snippet": chunk,
-            "preview": chunk[:80] + "..."
-        })
-        print(f"[CloneGuard] Indexed: {fn_name}")
+        added = index_store.add_if_not_duplicate(chunk, embedding, fn_name)
+        if added:
+            print(f"[CloneGuard] Indexed: {fn_name}")
+        else:
+            print(f"[CloneGuard] Skipping duplicate: {fn_name}")
 
-    print(f"[CloneGuard] FAISS index total: {faiss_index.ntotal} vectors")
-    return jsonify({"ok": True, "indexed": faiss_index.ntotal})
+    print(f"[CloneGuard] FAISS index total: {index_store.ntotal} vectors")
+    return jsonify({"ok": True, "indexed": index_store.ntotal})
 
 
 @app.route("/check", methods=["POST"])
@@ -911,7 +1119,7 @@ def check_clone():
     if not suggestion or len(suggestion.strip()) < 20:
         return jsonify({"isClone": False, "reason": "Too short"}), 200
 
-    if faiss_index.ntotal < 1:
+    if index_store.ntotal < 1:
         return jsonify({"isClone": False, "reason": "Index empty"}), 200
 
     suggestion = suggestion.strip()
@@ -954,14 +1162,28 @@ def check_clone():
         # operator compatibility checks already filter out wrong candidates,
         # so searching more broadly here is safe and just gives the correct
         # candidate a chance to be considered at all.
-        k = faiss_index.ntotal
-        print(f"[CloneGuard] DEBUG: faiss_index.ntotal={faiss_index.ntotal}, len(stored_functions)={len(stored_functions)}")
-        distances, indices = faiss_index.search(query, k)
+        #
+        # FIX (professor-flagged concurrency issue): previously read
+        # faiss_index.ntotal, then called faiss_index.search(), then indexed
+        # into stored_functions[idx] as three separate, unsynchronized steps
+        # -- a write landing between any of them could desync the two
+        # structures and raise IndexError, or silently return the wrong
+        # matched function. search_with_snapshot() does the search and
+        # copies out exactly the needed stored_functions entries under one
+        # lock acquisition, so this can no longer happen even under
+        # concurrent access.
+        distances, indices, entries = index_store.search_with_snapshot(query)
+        if distances is None:
+            continue
+        k = distances.shape[1]
+        print(f"[CloneGuard] DEBUG: searched {k} vectors")
 
         for rank in range(k):
             semantic_score = float(distances[0][rank])
             idx = int(indices[0][rank])
-            matched = stored_functions[idx]
+            if idx not in entries:
+                continue
+            matched = entries[idx]
 
             # Normalize matched snippet for comparison
             matched_body = normalize_body(extract_body(matched["snippet"]))
@@ -1005,8 +1227,8 @@ def check_clone():
             matched_stripped = strip_to_structure(extract_body(matched["snippet"]))
             print(f"[CloneGuard] chunk_stripped: {chunk_stripped[:80]}")
             print(f"[CloneGuard] matched_stripped: {matched_stripped[:80]}")
-            candidate_stmts = len(re.findall(r';', extract_body(chunk)))
-            matched_stmts   = len(re.findall(r';', extract_body(matched["snippet"])))
+            candidate_stmts = count_statements(extract_body(chunk))
+            matched_stmts   = count_statements(extract_body(matched["snippet"]))
             same_structure  = (chunk_stripped == matched_stripped)
             same_stmt_count = (candidate_stmts == matched_stmts)
             # Near-miss: matched structure is a subset of candidate structure
@@ -1064,8 +1286,22 @@ def check_clone():
             if not compatible:
                 continue
 
-            struct_score = structural_similarity(extract_body(chunk), extract_body(matched["snippet"]))
-            print(f"[CloneGuard] Structural: {struct_score:.4f}")
+            # FIX (professor-flagged, 3.2): structural_similarity() alone
+            # compares tokens positionally, so reordering two independent
+            # statements (or inserting a guard clause before existing
+            # logic) shifts everything after that point out of alignment
+            # even though the code's actual shape hasn't changed. /scan
+            # already guards against this by taking max(pos_score,
+            # bag_score) -- bag_similarity is a keyword-frequency Jaccard
+            # score, inherently order-independent. /check previously had
+            # no equivalent; bringing it in line here rather than
+            # inventing a new algorithm, since bag_score's behavior is
+            # already exercised and the struct_floor thresholds below are
+            # already calibrated against this exact combined-score shape.
+            pos_score = structural_similarity(extract_body(chunk), extract_body(matched["snippet"]))
+            bag_score = bag_similarity(extract_body(chunk), extract_body(matched["snippet"]))
+            struct_score = max(pos_score, bag_score)
+            print(f"[CloneGuard] Structural: {struct_score:.4f} (positional={pos_score:.4f}, bag={bag_score:.4f})")
 
             # FIX (found live, this session, via actual server console log):
             # lastElement() -> lastElementSafe() (guard clause added to a
@@ -1077,8 +1313,8 @@ def check_clone():
             # than adding one to a 2-3 statement body. Lowered to 0.07 to
             # cover this case too, confirmed against real log data rather
             # than guessed.
-            chunk_stmt_count = len(re.findall(r';', extract_body(chunk)))
-            matched_stmt_count = len(re.findall(r';', extract_body(matched["snippet"])))
+            chunk_stmt_count = count_statements(extract_body(chunk))
+            matched_stmt_count = count_statements(extract_body(matched["snippet"]))
             min_stmt_count = min(chunk_stmt_count, matched_stmt_count)
             struct_floor = 0.07 if min_stmt_count <= 3 else 0.15
             if struct_score < struct_floor:
@@ -1892,35 +2128,6 @@ def scan_file():
             return code[idx:].strip()
         return code
 
-    def bag_of_keywords(code):
-        """Keyword frequency bag — order-independent, works for any size snippet."""
-        keywords = {
-            "public","private","protected","static","final","void","int","long",
-            "double","float","boolean","char","byte","short","return","if","else",
-            "for","while","do","switch","case","break","continue","try","catch",
-            "throw","throws","new","null","true","false","this","super","instanceof"
-        }
-        code = re.sub(r"//[^\n]*", "", code)
-        code = re.sub(r"/\*[\s\S]*?\*/", "", code)
-        tokens = re.findall(r"\b[a-zA-Z_]\w*\b", code)
-        bag = {}
-        for t in tokens:
-            if t in keywords:
-                bag[t] = bag.get(t, 0) + 1
-        return bag
-
-    def bag_similarity(code1, code2):
-        b1 = bag_of_keywords(code1)
-        b2 = bag_of_keywords(code2)
-        if not b1 or not b2:
-            return 0.0
-        keys = set(b1) | set(b2)
-        intersection = sum(min(b1.get(k, 0), b2.get(k, 0)) for k in keys)
-        union = sum(max(b1.get(k, 0), b2.get(k, 0)) for k in keys)
-        score = intersection / union if union > 0 else 0.0
-        print(f"[CloneGuard] Bag similarity: {score:.4f}")
-        return score
-
     clone_groups = []
     seen_pairs = set()  # prevents A<->B and B<->A duplicates
 
@@ -2033,8 +2240,8 @@ def scan_file():
                     print(f"[CloneGuard] /scan skipping refactor wrappers: {fn_i['name']} <-> {fn_j['name']}")
                     seen_pairs.add(pair_key)
                     continue
-                stmts_i = len(re.findall(r';', extract_body_local(fn_i["snippet"])))
-                stmts_j = len(re.findall(r';', extract_body_local(fn_j["snippet"])))
+                stmts_i = count_statements(extract_body_local(fn_i["snippet"]))
+                stmts_j = count_statements(extract_body_local(fn_j["snippet"]))
                 if stmts_i == stmts_j:
                     # Same structure AND same statement count → Type 2
                     clone_groups.append({
@@ -2156,8 +2363,8 @@ def scan_file():
             # the adaptive floor for /check in the first place. /scan never
             # got that same fix, so the two endpoints silently diverged on
             # this exact class of case. Bringing them in line.
-            stmts_i = len(re.findall(r';', extract_body_local(fn_i["snippet"])))
-            stmts_j = len(re.findall(r';', extract_body_local(fn_j["snippet"])))
+            stmts_i = count_statements(extract_body_local(fn_i["snippet"]))
+            stmts_j = count_statements(extract_body_local(fn_j["snippet"]))
             min_stmts = min(stmts_i, stmts_j)
             struct_floor = 0.07 if min_stmts <= 3 else 0.15
             if struct_score < struct_floor:
@@ -2262,7 +2469,7 @@ def suggest_single_pair():
 def health():
     return jsonify({
         "status": "ok",
-        "indexed": faiss_index.ntotal,
+        "indexed": index_store.ntotal,
         "models": ["codebert", "unixcoder"]
     })
 

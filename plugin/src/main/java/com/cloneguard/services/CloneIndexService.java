@@ -2,7 +2,6 @@ package com.cloneguard.services;
 
 import com.cloneguard.detection.LocalCloneDetector;
 import com.cloneguard.model.CloneResult;
-import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.components.Service;
 import com.intellij.openapi.project.Project;
 
@@ -10,14 +9,33 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.regex.*;
 
-@Service(Service.Level.APP)
+@Service(Service.Level.PROJECT)
 public final class CloneIndexService {
 
+    private final Project project;
     private LocalCloneDetector localDetector = new LocalCloneDetector();
     private final Map<String, String> functionBodies = new LinkedHashMap<>();
 
-    public static CloneIndexService getInstance() {
-        return ApplicationManager.getApplication().getService(CloneIndexService.class);
+    public CloneIndexService(Project project) {
+        this.project = project;
+    }
+
+    /**
+     * FIX (professor-flagged): previously this was an app-level
+     * singleton (Service.Level.APP) retrieved via
+     * ApplicationManager.getApplication().getService(...), meaning ONE
+     * index was shared across every project open in the IDE -- pasting
+     * code in Project A could surface a "Type 1 clone" warning pointing
+     * at a completely unrelated function in Project B, and the index
+     * grew without bound for the lifetime of the whole IDE session
+     * rather than a single project's lifetime. Now project-scoped:
+     * each project gets its own isolated instance, created and disposed
+     * by the platform's normal project lifecycle, exactly like
+     * FileScannerService and PythonServerClient already are elsewhere
+     * in this codebase.
+     */
+    public static CloneIndexService getInstance(Project project) {
+        return project.getService(CloneIndexService.class);
     }
 
     public void indexFunction(Project project, String name, String body) {
@@ -44,6 +62,29 @@ public final class CloneIndexService {
     }
 
     // ── Rule-Based AI Detection (runs locally, no server needed) ──────────────
+
+    /**
+     * NOTE (professor-flagged, 3.4): every signal below is regex/string
+     * matching over raw text, which is inherently fragile — a pattern
+     * loose enough to catch real AI output tends to also catch ordinary
+     * human code (Signal 5's method-chaining check, tightened below, was
+     * one confirmed case of this). The professor's stronger recommendation
+     * is to rebuild this on IntelliJ's PSI (Program Structure Interface)
+     * AST — e.g. counting actual PsiMethodCallExpression nesting depth
+     * instead of regex-matching ")." sequences — which would be far more
+     * precise. That rewrite isn't attempted here: this method is called
+     * on raw pasted/typed text at the moment of a paste event, which may
+     * not yet be part of a stable, parseable PSI tree, so a PSI-based
+     * version would need a different integration point (e.g. running
+     * after the document settles) rather than a drop-in replacement of
+     * this method's signature. Tracked as a follow-up. In the meantime,
+     * detect() below now treats the server's UniXcoder model as the
+     * primary signal whenever it's available, with this local heuristic
+     * only deciding the outcome when the server itself is uncertain —
+     * reducing how often a fragile local signal alone can override a
+     * confident, more reliable server verdict, per the professor's
+     * "rely primarily on the UniXcoder model" recommendation.
+     */
 
     /**
      * Detects if code is AI-generated using 4 rule-based signals.
@@ -113,7 +154,26 @@ public final class CloneIndexService {
         }
 
         // Signal 5: Method chaining — AI almost always chains methods
-        boolean hasMethodChaining = bodyOnly.contains("().") || (bodyOnly.indexOf(".") != bodyOnly.lastIndexOf(".") && bodyOnly.contains("("));
+        //
+        // FIX (professor-flagged, 3.4): the old check --
+        // bodyOnly.contains("().") -- matches almost any ordinary Java
+        // code with a single chained call after a no-arg method, e.g.
+        // sb.toString().trim() or list.get(0).toString(). Neither is an
+        // AI-specific pattern; both are extremely common human code.
+        // Genuine AI-style heavy chaining links multiple calls together
+        // (list.stream().filter(...).map(...).collect(...)), not just
+        // one. Counting call-then-dot "links" and requiring at least 2
+        // (i.e. a chain 3 calls deep) is a meaningfully tighter bar that
+        // stops firing on single-hop human patterns while still catching
+        // genuinely chain-heavy code. This is still regex-based, not the
+        // PSI AST call-depth analysis the professor's recommendation
+        // describes as the more correct fix — see the class-level note
+        // above detectAiLocal() for why that larger rewrite is being
+        // tracked as a follow-up rather than attempted here.
+        int chainLinks = 0;
+        Matcher chainMatcher = Pattern.compile("\\)\\s*\\.\\s*\\w+\\s*\\(").matcher(bodyOnly);
+        while (chainMatcher.find()) chainLinks++;
+        boolean hasMethodChaining = chainLinks >= 2;
         if (hasMethodChaining) {
             signals++;
         }
@@ -276,25 +336,36 @@ public final class CloneIndexService {
         // exists for exactly this discrimination task: server.py's
         // /detect-ai (UniXcoder) endpoint, exposed via
         // PythonServerClient.detectAI() — which was built but never called
-        // anywhere in this pipeline. We now combine both signals: if either
-        // the local heuristic or the server model is confident it's AI, we
-        // show the AI badge, and prefer whichever signal is more confident
-        // for the displayed confidence/label.
-        AiDetectionResult combinedAi = localAi;
+        // anywhere in this pipeline.
+        //
+        // FIX (professor-flagged, 3.4): the combination logic used here
+        // was originally a plain OR — if EITHER signal was confident it's
+        // AI, the code got flagged — which meant a fragile local signal
+        // (like the old, over-broad Signal 5) could unilaterally flag
+        // ordinary human code even when UniXcoder confidently said
+        // otherwise. An OR can only ever push the verdict toward "AI"; it
+        // has no way to let a confident server "not AI" override a wrong
+        // local "AI" flag. Server verdict is now primary whenever the
+        // server itself is confident (either direction); the local
+        // heuristic only decides the outcome when the server is
+        // uncertain, or is fully unavailable (offline fallback,
+        // unchanged from before).
+        AiDetectionResult combinedAi;
         if (serverAlive) {
             PythonServerClient.AiDetectionResult serverAi = client.detectAI(codeToAnalyze);
-            boolean localFlagsAi  = localAi.isAiGenerated && localAi.confidence > 0.60;
-            boolean serverFlagsAi = serverAi != null && serverAi.isAiGenerated && serverAi.confidence > 0.60;
-            if (serverFlagsAi || localFlagsAi) {
-                if (serverAi != null && serverAi.confidence >= localAi.confidence) {
-                    combinedAi = new AiDetectionResult(true, serverAi.confidence, serverAi.label);
-                } else {
-                    combinedAi = new AiDetectionResult(true, localAi.confidence, localAi.label);
-                }
+            if (serverAi != null && serverAi.confidence > 0.60) {
+                // Server has a confident opinion — trust it, whichever way it points.
+                combinedAi = new AiDetectionResult(serverAi.isAiGenerated, serverAi.confidence, serverAi.label);
+            } else if (localAi.isAiGenerated && localAi.confidence > 0.60) {
+                // Server uncertain or unreachable this call — fall back to local signal.
+                combinedAi = localAi;
             } else {
-                combinedAi = new AiDetectionResult(false, Math.max(localAi.confidence,
-                        serverAi != null ? serverAi.confidence : 0.0), localAi.label);
+                double bestConfidence = Math.max(localAi.confidence, serverAi != null ? serverAi.confidence : 0.0);
+                combinedAi = new AiDetectionResult(false, bestConfidence, localAi.label);
             }
+        } else {
+            // Server unavailable — same offline behavior as before.
+            combinedAi = localAi;
         }
 
         // ── Step 2: Clone detection in background ─────────────────────────
@@ -376,10 +447,70 @@ public final class CloneIndexService {
         return Collections.unmodifiableSet(functionBodies.entrySet());
     }
 
+    /**
+     * FIX (professor-flagged, 3.3): the previous implementation counted
+     * every raw ';' character in the code as a statement, which a
+     * for-loop header inflates by up to 2 (the init and condition
+     * semicolons in "for (int i = 0; i < n; i++)") relative to an
+     * otherwise-equivalent while-loop, and which try-with-resources
+     * inflates similarly when declaring multiple resources. A semicolon
+     * inside a string literal was also miscounted as a statement
+     * terminator. This strips for(...) and try(...) header contents (and
+     * string/char literals and comments) before counting, so only
+     * semicolons that actually terminate a real statement are counted.
+     *
+     * This does NOT implement the professor's stronger recommendation --
+     * using IntelliJ's PSI to count actual AST statement nodes on the
+     * client side and passing that count to the server as request
+     * metadata. That would be a more precise, genuinely correct fix, but
+     * requires changes to the request payload contract shared with
+     * PythonServerClient and server.py, which wasn't attempted here to
+     * avoid touching files/contracts outside what could be directly
+     * verified this session. Tracked as a follow-up, same as the
+     * PSI-based AI-detection rewrite noted above detectAiLocal().
+     */
     private static int countSemicolons(String code) {
+        if (code == null || code.isBlank()) return 0;
+
+        String cleaned = code
+                .replaceAll("//[^\n]*", "")
+                .replaceAll("/\\*[\\s\\S]*?\\*/", "")
+                .replaceAll("\"(?:[^\"\\\\]|\\\\.)*\"", "\"\"")
+                .replaceAll("'(?:[^'\\\\]|\\\\.)'", "''");
+
+        cleaned = stripLoopAndTryHeaders(cleaned);
+
         int count = 0;
-        for (char c : code.toCharArray()) if (c == ';') count++;
+        for (char c : cleaned.toCharArray()) if (c == ';') count++;
         return count;
+    }
+
+    /**
+     * Replaces the contents of every for(...) and try(...) header with
+     * an empty parenthesis pair, leaving the loop/try body untouched.
+     * Correctly handles a nested call inside the header (e.g.
+     * "for (int i = 0; i < arr.length(); i++)") via paren-depth
+     * tracking, not just a naive first-close-paren match.
+     */
+    private static String stripLoopAndTryHeaders(String code) {
+        StringBuilder result = new StringBuilder();
+        Matcher m = Pattern.compile("\\b(for|try)\\s*\\(").matcher(code);
+        int lastEnd = 0;
+        while (m.find(lastEnd)) {
+            result.append(code, lastEnd, m.end()); // keep "for(" / "try("
+            int depth = 1;
+            int i = m.end();
+            while (i < code.length() && depth > 0) {
+                char c = code.charAt(i);
+                if (c == '(') depth++;
+                else if (c == ')') depth--;
+                i++;
+            }
+            result.append(")"); // header content dropped, closing paren kept
+            lastEnd = i;
+        }
+        result.append(code, lastEnd, code.length());
+        return result.toString();
     }
 
     private String extractBody(String code) {

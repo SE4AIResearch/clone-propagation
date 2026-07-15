@@ -88,7 +88,22 @@ public final class FileScannerService {
             for (PsiMethod method : methods) {
                 PsiCodeBlock body = method.getBody();
                 if (body == null) continue;
-                result.put(buildSignature(method), body.getText());
+                // FIX (professor-flagged, confirmed live): previously sent
+                // body.getText() -- body-only text, no modifiers/return
+                // type/name -- as the function's code, with the real
+                // signature only embedded in buildSignature() as the map
+                // KEY, which the server never parses. server.py's
+                // get_return_type_shared() correctly detects body-only
+                // code (starts with "{") and returns "unknown" rather than
+                // misfiring on it, but "unknown" == "unknown" still PASSES
+                // the return-type compatibility check in
+                // operations_compatible_shared(), silently disabling that
+                // gate for every pair in every Scenario 2 scan, not just an
+                // occasional edge case. method.getText() gives the full
+                // signature + body, matching what
+                // InlineSuggestionListener.indexFunctions() already does
+                // correctly elsewhere in this codebase.
+                result.put(method.getName(), method.getText());
             }
             if (!result.isEmpty()) {
                 LOG.info("CloneGuard: PSI extracted " + result.size() + " methods");
@@ -116,19 +131,6 @@ public final class FileScannerService {
         editor.getScrollingModel().scrollToCaret(ScrollType.CENTER);
     }
 
-    private String buildSignature(PsiMethod method) {
-        StringBuilder sb = new StringBuilder(method.getName()).append("(");
-        PsiParameter[] params = method.getParameterList().getParameters();
-        for (int i = 0; i < params.length; i++) {
-            if (i > 0) sb.append(", ");
-            sb.append(params[i].getType().getPresentableText()).append(" ").append(params[i].getName());
-        }
-        sb.append(")");
-        PsiType returnType = method.getReturnType();
-        if (returnType != null) sb.append(":").append(returnType.getPresentableText());
-        return sb.toString();
-    }
-
     private void extractWithRegex(String text, Map<String, String> out) {
         Pattern p = Pattern.compile(
             "(?:(?:public|private|protected|static|final|synchronized)\\s+)*" +
@@ -139,18 +141,29 @@ public final class FileScannerService {
         while (m.find()) {
             String name = m.group(1);
             if (Set.of("if","for","while","switch","class","interface","enum").contains(name)) continue;
-            String body = extractBracedBlock(text, m.end() - 1);
-            if (body != null && body.length() > 3) out.put(name, body);
+            // FIX (same root cause as the PSI path above): previously
+            // captured only the braced block (extractBracedBlock from the
+            // opening brace onward), discarding the signature the regex
+            // match itself already spans (from m.start() through the
+            // opening brace). Now captures the full method text -- start
+            // of the match through the matching closing brace -- so this
+            // fallback path sends the same full-method format as the
+            // primary PSI path, keeping the two extraction paths
+            // consistent with each other.
+            int closeBrace = findMatchingCloseBrace(text, m.end() - 1);
+            if (closeBrace < 0) continue;
+            String fullMethod = text.substring(m.start(), closeBrace + 1);
+            if (fullMethod.length() > 3) out.put(name, fullMethod);
         }
     }
 
-    private String extractBracedBlock(String text, int openBrace) {
+    private int findMatchingCloseBrace(String text, int openBrace) {
         int depth = 0;
         for (int i = openBrace; i < text.length(); i++) {
             char c = text.charAt(i);
             if (c == '{') depth++;
-            else if (c == '}') { depth--; if (depth == 0) return text.substring(openBrace, i + 1); }
+            else if (c == '}') { depth--; if (depth == 0) return i; }
         }
-        return null;
+        return -1;
     }
 }
