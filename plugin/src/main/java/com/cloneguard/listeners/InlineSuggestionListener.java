@@ -113,7 +113,7 @@ public class InlineSuggestionListener implements EditorFactoryListener {
             }
         }
 
-        CloneResult result = CloneIndexService.getInstance().detect(project, codeToCheck);
+        CloneResult result = CloneIndexService.getInstance(project).detect(project, codeToCheck);
         LOG.info("CloneGuard: detection result: " + result);
 
         // Always run AI detection independently — works even on empty index
@@ -434,7 +434,7 @@ public class InlineSuggestionListener implements EditorFactoryListener {
         if (vf == null) return;
         PsiFile psi = PsiManager.getInstance(project).findFile(vf);
         if (psi == null) return;
-        CloneIndexService idx = CloneIndexService.getInstance();
+        CloneIndexService idx = CloneIndexService.getInstance(project);
 
         // Always clear first — removes deleted functions from index
         idx.clearWithServer(project);

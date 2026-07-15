@@ -53,8 +53,34 @@
             icon="/icons/cloneguard.svg"/>
 
         <!-- Application-level services -->
+        <!--
+            CloneGuardSettings: new (issue 4.2), persists the
+            configurable server URL, replacing the old hardcoded
+            constant in PythonServerClient.
+        -->
         <applicationService
-            serviceImplementation="com.cloneguard.services.CloneIndexService"/>
+            serviceImplementation="com.cloneguard.settings.CloneGuardSettings"/>
+
+        <!--
+            FIX (professor-flagged, 2.3): CloneIndexService was
+            registered here as an applicationService, but the class
+            itself was changed to @Service(Service.Level.PROJECT) to fix
+            the cross-project data leak the professor identified (a
+            paste in Project A could match a function from Project B,
+            since the index was shared IDE-wide). This XML registration
+            must match that annotation: left as applicationService,
+            the registration and the actual service level disagree,
+            which either breaks plugin startup or silently reintroduces
+            the exact bug 2.3 was meant to fix. Moved to projectService
+            below, alongside the plugin's other project-scoped services.
+        -->
+
+        <!-- Settings/Preferences panel: new (issue 4.2) -->
+        <applicationConfigurable
+            parentId="tools"
+            instance="com.cloneguard.settings.CloneGuardConfigurable"
+            id="com.cloneguard.settings.CloneGuardConfigurable"
+            displayName="CloneGuard"/>
 
         <!-- Project-level services -->
         <projectService
@@ -62,6 +88,10 @@
 
         <projectService
             serviceImplementation="com.cloneguard.services.PythonServerClient"/>
+
+        <!-- Moved from applicationService above: see FIX note (issue 2.3) -->
+        <projectService
+            serviceImplementation="com.cloneguard.services.CloneIndexService"/>
 
     </extensions>
 

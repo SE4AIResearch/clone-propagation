@@ -17,7 +17,17 @@ import java.util.*;
 public final class PythonServerClient {
 
     private static final Logger LOG = Logger.getInstance(PythonServerClient.class);
-    private static final String BASE_URL = "http://localhost:8765";
+
+    // FIX (professor-flagged, 4.2): previously a hardcoded compile-time
+    // constant ("http://localhost:8765"), meaning changing the target
+    // server required editing source and rebuilding the plugin. Now reads
+    // from CloneGuardSettings (a new persistent, application-level
+    // setting, configurable via Settings/Preferences -> Tools ->
+    // CloneGuard) on every call, so a change takes effect immediately
+    // without a restart or rebuild.
+    private static String baseUrl() {
+        return com.cloneguard.settings.CloneGuardSettings.getInstance().getServerUrl();
+    }
 
     private HttpClient http;
     private final Gson gson = new Gson();
@@ -36,7 +46,7 @@ public final class PythonServerClient {
     public boolean isServerAlive() {
         try {
             HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(BASE_URL + "/health"))
+                    .uri(URI.create(baseUrl() + "/health"))
                     .timeout(Duration.ofSeconds(2))
                     .GET().build();
             HttpResponse<String> resp = getHttp().send(req, HttpResponse.BodyHandlers.ofString());
@@ -265,7 +275,7 @@ public final class PythonServerClient {
 
     private HttpResponse<String> post(String path, String jsonBody) throws Exception {
         HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create(BASE_URL + path))
+                .uri(URI.create(baseUrl() + path))
                 .timeout(Duration.ofSeconds(30))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(jsonBody, StandardCharsets.UTF_8))

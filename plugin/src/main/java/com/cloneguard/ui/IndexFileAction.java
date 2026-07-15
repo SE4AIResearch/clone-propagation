@@ -26,7 +26,7 @@ public class IndexFileAction extends AnAction {
         if (psiFile == null) return;
 
         FileScannerService scanner = project.getService(FileScannerService.class);
-        CloneIndexService  index   = CloneIndexService.getInstance();
+        CloneIndexService  index   = CloneIndexService.getInstance(project);
 
         Map<String, String> functions = scanner.extractFunctions(psiFile);
         for (Map.Entry<String, String> entry : functions.entrySet()) {
