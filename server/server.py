@@ -1176,7 +1176,10 @@ def check_clone():
         if distances is None:
             continue
         k = distances.shape[1]
-        print(f"[CloneGuard] DEBUG: searched {k} vectors")
+        # (professor-flagged: removed unconditional DEBUG print of vector
+        # count here -- was firing on every /check request regardless of
+        # environment, pure log noise in production with no operational
+        # value beyond what the per-candidate prints below already show)
 
         for rank in range(k):
             semantic_score = float(distances[0][rank])
@@ -1206,7 +1209,10 @@ def check_clone():
 
             # Type 1: exact body match = always a clone
             # Whether same name or different name — if body is identical it's a duplicate
-            pasted_name = extract_function_name(suggestion, -1)
+            # (professor-flagged: pasted_name was being recomputed here identically
+            # to the computation a few lines above at line 1197 -- removed, the
+            # earlier value is still in scope and nothing between the two call
+            # sites changes 'suggestion' or invalidates the result)
             if chunk_body == matched_body:
                 print(f"[CloneGuard] Type 1 detected: {matched_name}")
                 return jsonify({
