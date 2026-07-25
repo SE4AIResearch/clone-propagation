@@ -93,6 +93,25 @@
         <projectService
             serviceImplementation="com.cloneguard.services.CloneIndexService"/>
 
+        <!--
+            FIX (found live, Trend Dashboard testing): MetricsTrackerService
+            was never registered here at all when the Trend Dashboard
+            feature was built — every other project-level service in this
+            file (FileScannerService, PythonServerClient, CloneIndexService)
+            has an explicit projectService entry, but this one was missed.
+            Same category of bug as the CloneIndexService fix noted above:
+            the class's own @Service(Service.Level.PROJECT) annotation and
+            its XML registration have to agree, or the service doesn't
+            reliably resolve. Confirmed live: refactors succeeded normally
+            (that code path never touches this service), but every
+            recordRefactor()/startSession() call downstream of
+            MetricsTrackerService.getInstance(project) silently did
+            nothing, and the Trend Dashboard stayed permanently empty
+            regardless of how many refactors or scans were run.
+        -->
+        <projectService
+            serviceImplementation="com.cloneguard.services.MetricsTrackerService"/>
+
     </extensions>
 
     <actions>

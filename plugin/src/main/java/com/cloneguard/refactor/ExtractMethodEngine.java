@@ -111,6 +111,115 @@ public class ExtractMethodEngine {
         }
     }
 
+    // FIX (found live, Pull Up Method testing): resolves a method name
+    // against a PsiFile, supporting TWO formats. A bare simple name
+    // ("describe") matches the first method found with that name --
+    // exactly the original behavior, unchanged, and still correct for
+    // every existing same-class Extract Method / Delegation flow, since a
+    // name collision was never possible there before Pull Up existed. A
+    // class-qualified name ("Dog.describe") matches only a method with
+    // that simple name INSIDE that specific class. The qualified format
+    // is what FileScannerService.extractFunctions() now produces, but
+    // ONLY when a real collision exists in the file (see its own comment
+    // for why) -- so this qualified branch only ever activates for the
+    // rare case a bare-name lookup would otherwise have been ambiguous.
+    // Every one of this engine's method-lookup loops (extract, delegate,
+    // pullUp, pushDown, and the pullUp-applicability pre-check) goes
+    // through this one shared resolver so a fix here fixes all of them
+    // identically, rather than needing five separate edits kept in sync.
+    private static PsiMethod resolveMethodByName(PsiFile psiFile, String name) {
+        if (name == null) return null;
+        String targetClass = null;
+        String targetMethod = name;
+        int dot = name.indexOf('.');
+        if (dot > 0) {
+            targetClass = name.substring(0, dot);
+            targetMethod = name.substring(dot + 1);
+        }
+        for (PsiMethod m : PsiTreeUtil.findChildrenOfType(psiFile, PsiMethod.class)) {
+            if (!m.getName().equals(targetMethod)) continue;
+            if (targetClass == null) return m;
+            PsiClass owner = m.getContainingClass();
+            if (owner != null && targetClass.equals(owner.getName())) return m;
+        }
+        return null;
+    }
+
+    /**
+     * Resolves the (canonical, duplicate) PAIR together, handling the
+     * case where both names are literally identical — which is the
+     * COMMON case for a real clone (e.g. Dog.describe() and
+     * Cat.describe() are both just named "describe", with nothing to
+     * qualify them by if the caller only ever tracked bare names).
+     * resolveMethodByName() alone can't disambiguate this: called twice
+     * with the same bare name, it deterministically returns the SAME
+     * first match both times, so canonical and duplicate silently
+     * resolve to the IDENTICAL PsiMethod — which then makes every
+     * "different classes" check downstream (Pull Up eligibility, plan-
+     * building) incorrectly fail, since as far as those checks can
+     * tell, there's only one method involved, not two.
+     *
+     * FIX (found live, this session — Scenario 1 Pull Up parity test):
+     * confirmed via direct testing that Dog.describe() / Cat.describe()
+     * — identical bare names, the single most common real-world shape
+     * for a clone pair — silently fell back to plain Extract Method
+     * instead of Pull Up, even though Dog and Cat both extend Animal.
+     * Scenario 2's own extraction already dodges this by qualifying
+     * colliding names as "ClassName.methodName" ahead of time (see
+     * FileScannerService.extractFunctions()); Scenario 1's paste-
+     * detection index has no equivalent qualification step, so this
+     * needs to be handled here instead, at resolution time, and this
+     * fix applies to every caller that resolves a (canonical, duplicate)
+     * pair — not just Pull Up's routing check — since the same
+     * ambiguity exists wherever two same-named methods are resolved
+     * independently by name.
+     *
+     * When canonical and duplicate are genuinely different strings
+     * (already unambiguous — different names, or one/both already
+     * class-qualified), this resolves each independently exactly as
+     * resolveMethodByName always did, with zero behavior change for
+     * that case.
+     *
+     * When they're identical, finds every method in the file with that
+     * name and, if at least two exist, returns the first two IN FILE
+     * ORDER as [canonical, duplicate] — a deterministic, defensible
+     * convention. This is safe specifically because every caller of
+     * this method already operates in a context where a clone was
+     * independently detected between exactly two occurrences — the
+     * structural/eligibility checks that run immediately after this
+     * still independently verify real safety regardless of which two
+     * get picked here, so even in a rare 3+-occurrence case this can't
+     * produce an unsafe result, at worst a differently-paired (but
+     * still individually valid) match than the one originally intended.
+     */
+    private static PsiMethod[] resolveDistinctPairByName(PsiFile psiFile, String canonical, String duplicate) {
+        if (canonical == null || duplicate == null) return null;
+        if (!canonical.equals(duplicate)) {
+            PsiMethod a = resolveMethodByName(psiFile, canonical);
+            PsiMethod b = resolveMethodByName(psiFile, duplicate);
+            return (a == null || b == null) ? null : new PsiMethod[]{a, b};
+        }
+        String targetClass = null;
+        String targetMethod = canonical;
+        int dot = canonical.indexOf('.');
+        if (dot > 0) {
+            targetClass = canonical.substring(0, dot);
+            targetMethod = canonical.substring(dot + 1);
+        }
+        List<PsiMethod> matches = new ArrayList<>();
+        for (PsiMethod m : PsiTreeUtil.findChildrenOfType(psiFile, PsiMethod.class)) {
+            if (!m.getName().equals(targetMethod)) continue;
+            if (targetClass != null) {
+                PsiClass owner = m.getContainingClass();
+                if (owner == null || !targetClass.equals(owner.getName())) continue;
+            }
+            matches.add(m);
+            if (matches.size() >= 2) break;
+        }
+        if (matches.size() < 2) return null;
+        return new PsiMethod[]{matches.get(0), matches.get(1)};
+    }
+
     private static class ExtractionPlan {
         boolean aborted;
         String abortTitle;
@@ -224,6 +333,15 @@ public class ExtractMethodEngine {
         int choice = Messages.showYesNoDialog(plan.confirmMessage, "CloneGuard — Confirm Refactor", Messages.getQuestionIcon());
         if (choice != Messages.YES) return;
 
+        // Captured BEFORE the write action runs, from data already sitting
+        // in the plan — the duplicate's original body text (about to be
+        // replaced) versus its planned replacement text — so the "lines
+        // eliminated" figure reflects the true before/after, not a
+        // post-hoc guess.
+        int oldDuplicateLines = countLines(plan.duplicateMethod.getBody() != null ? plan.duplicateMethod.getBody().getText() : "");
+        int newDuplicateLines = countLines(plan.newDuplicateBodyText);
+        int duplicatedLinesEliminated = Math.max(0, oldDuplicateLines - newDuplicateLines);
+
         final boolean[] writeFailed = {false};
         final String[] writeFailureMessage = {null};
 
@@ -276,6 +394,7 @@ public class ExtractMethodEngine {
         generatedHelperNames.add(plan.finalHelperName);
         if (plan.resultClassName != null) generatedResultClassNames.add(plan.resultClassName);
         extractedPairs.put(pairKey, System.currentTimeMillis());
+        com.cloneguard.services.MetricsTrackerService.getInstance(project).recordRefactor("extract", duplicatedLinesEliminated, cloneTypeLabel);
 
         showDialog(
                 "✅ Extract Method applied!\n\n" +
@@ -291,12 +410,9 @@ public class ExtractMethodEngine {
     // from inside a ReadAction. Returns either an aborted plan (with the
     // dialog to show) or a ready-to-confirm plan. Shows NO dialogs itself.
     private ExtractionPlan buildExtractionPlan(PsiFile psiFile, String canonical, String duplicate, String cloneTypeLabel) {
-        PsiMethod canonicalMethod = null;
-        PsiMethod duplicateMethod = null;
-        for (PsiMethod m : PsiTreeUtil.findChildrenOfType(psiFile, PsiMethod.class)) {
-            if (m.getName().equals(canonical)) canonicalMethod = m;
-            if (m.getName().equals(duplicate)) duplicateMethod = m;
-        }
+        PsiMethod[] resolvedPair = resolveDistinctPairByName(psiFile, canonical, duplicate);
+        PsiMethod canonicalMethod = resolvedPair != null ? resolvedPair[0] : null;
+        PsiMethod duplicateMethod = resolvedPair != null ? resolvedPair[1] : null;
 
         if (canonicalMethod == null || duplicateMethod == null) {
             return ExtractionPlan.abort("CloneGuard",
@@ -920,6 +1036,10 @@ public class ExtractMethodEngine {
         int choice = Messages.showYesNoDialog(plan.confirmMessage, "CloneGuard — Confirm Refactor", Messages.getQuestionIcon());
         if (choice != Messages.YES) return;
 
+        int oldDuplicateLines = countLines(plan.duplicateMethod.getBody() != null ? plan.duplicateMethod.getBody().getText() : "");
+        int newDuplicateLines = countLines(plan.newDuplicateBodyText);
+        int duplicatedLinesEliminated = Math.max(0, oldDuplicateLines - newDuplicateLines);
+
         final boolean[] writeFailed = {false};
         final String[] writeFailureMessage = {null};
 
@@ -948,6 +1068,7 @@ public class ExtractMethodEngine {
         }
 
         extractedPairs.put(pairKey, System.currentTimeMillis());
+        com.cloneguard.services.MetricsTrackerService.getInstance(project).recordRefactor("delegate", duplicatedLinesEliminated, cloneTypeLabel);
 
         showDialog(
                 "✅ Method Delegation applied!\n\n" +
@@ -979,12 +1100,9 @@ public class ExtractMethodEngine {
     }
 
     private DelegationPlan buildDelegationPlan(PsiFile psiFile, String canonical, String duplicate, String cloneTypeLabel) {
-        PsiMethod canonicalMethod = null;
-        PsiMethod duplicateMethod = null;
-        for (PsiMethod m : PsiTreeUtil.findChildrenOfType(psiFile, PsiMethod.class)) {
-            if (m.getName().equals(canonical)) canonicalMethod = m;
-            if (m.getName().equals(duplicate)) duplicateMethod = m;
-        }
+        PsiMethod[] resolvedPair = resolveDistinctPairByName(psiFile, canonical, duplicate);
+        PsiMethod canonicalMethod = resolvedPair != null ? resolvedPair[0] : null;
+        PsiMethod duplicateMethod = resolvedPair != null ? resolvedPair[1] : null;
         if (canonicalMethod == null || duplicateMethod == null) {
             return DelegationPlan.abort("CloneGuard",
                     "Could not find one or both methods (" + canonical + "(), " + duplicate + "()) in this file. " +
@@ -1267,9 +1385,756 @@ public class ExtractMethodEngine {
         return tokens;
     }
 
+    /**
+     * Like statementsStructurallyEqual, but compares an ENTIRE method body
+     * (every statement must match, not just a contiguous window) and
+     * RETURNS the resulting identifier mapping instead of a boolean.
+     * Pull Up Method's Type 2 support (see buildPullUpPlan) needs to know
+     * WHICH identifiers differ, not just whether the bodies are
+     * consistent, so it can check each one against PSI to rule out
+     * renamed FIELDS specifically -- see the design note in
+     * buildPullUpPlan for why that distinction is the one that actually
+     * matters. Returns null if the bodies have a different statement
+     * count or don't tokenize into a consistent structural match at all.
+     */
+    private Map<String, String> buildFullBodyIdentifierMapping(PsiStatement[] a, PsiStatement[] b) {
+        if (a.length != b.length) return null;
+        Map<String, String> aToB = new LinkedHashMap<>();
+        Map<String, String> bToA = new LinkedHashMap<>();
+        for (int k = 0; k < a.length; k++) {
+            List<String[]> tokensA = tokenizeStatement(a[k].getText());
+            List<String[]> tokensB = tokenizeStatement(b[k].getText());
+            if (tokensA.size() != tokensB.size()) return null;
+            for (int t = 0; t < tokensA.size(); t++) {
+                String kindA = tokensA.get(t)[0], valA = tokensA.get(t)[1];
+                String kindB = tokensB.get(t)[0], valB = tokensB.get(t)[1];
+                if (!kindA.equals(kindB)) return null;
+                if (kindA.equals("id")) {
+                    String mapped = aToB.get(valA);
+                    if (mapped != null) {
+                        if (!mapped.equals(valB)) return null;
+                    } else if (bToA.containsKey(valB)) {
+                        return null;
+                    } else {
+                        aToB.put(valA, valB);
+                        bToA.put(valB, valA);
+                    }
+                } else if (!valA.equals(valB)) {
+                    return null;
+                }
+            }
+        }
+        return aToB;
+    }
+
+    /**
+     * True if `identifierName`, as it appears inside `body`, ever
+     * resolves (via real PSI reference resolution, not text matching) to
+     * a field. Used to distinguish a renamed LOCAL variable/parameter
+     * (safe -- invisible outside the method, so Pull Up can keep either
+     * name with zero external impact) from a renamed FIELD (unsafe --
+     * two different pieces of subclass state, not just two names for the
+     * same thing).
+     */
+    private boolean identifierResolvesToField(PsiCodeBlock body, String identifierName) {
+        for (PsiReferenceExpression ref : PsiTreeUtil.findChildrenOfType(body, PsiReferenceExpression.class)) {
+            if (!identifierName.equals(ref.getReferenceName())) continue;
+            if (ref.resolve() instanceof PsiField) return true;
+        }
+        return false;
+    }
+
     private static String capitalize(String s) {
         if (s == null || s.isEmpty()) return s;
         return Character.toUpperCase(s.charAt(0)) + s.substring(1);
+    }
+
+    /**
+     * Same simple, transparent line-counting approach as
+     * MetricsTrackerService.countLines() — raw physical line count, no
+     * blank/comment filtering. Used here specifically to compute
+     * "duplicated lines eliminated" at each refactor's success point,
+     * from text already sitting in the plan (before/after body text),
+     * before it's handed off to the metrics service to record.
+     */
+    private static int countLines(String text) {
+        if (text == null || text.isEmpty()) return 0;
+        return (int) text.lines().count();
+    }
+
+
+    // ─────────────────────────────────────────────────────────────────────
+    // PULL UP METHOD & PUSH DOWN METHOD
+    // ─────────────────────────────────────────────────────────────────────
+    //
+    // Pull Up reuses the (canonical, duplicate) convention, same as extract()
+    // and delegate() — it's still fundamentally "two clone methods", just
+    // living in sibling subclasses of a common superclass instead of the
+    // same class.
+    //
+    // SCOPE DECISION (documented the same way 2.1/3.3 are documented as
+    // partial scope elsewhere in this codebase, updated after adding Type
+    // 2 support): Pull Up now accepts both an exact match after
+    // whitespace normalization (Type 1) AND a renamed-identifier match
+    // (Type 2) -- but only when EVERY identifier that differs between the
+    // two bodies is a LOCAL VARIABLE or PARAMETER, never a FIELD. That
+    // distinction, not "renamed vs. not renamed," is what actually
+    // determines safety: a local variable is invisible outside the
+    // method it's declared in, so canonicalMethod's own text (with its
+    // own local names) is already fully self-consistent and safe to move
+    // as-is -- no call-site rewriting needed anywhere, because nothing
+    // outside the method ever referenced that local name to begin with.
+    // A renamed FIELD is a genuinely different situation: it means the
+    // two subclasses are backed by different pieces of state (e.g.
+    // Dog.breed vs Cat.species), and silently picking one over the other
+    // would be a real behavior change, not a cosmetic rename -- that case
+    // is still refused. See buildFullBodyIdentifierMapping() and
+    // identifierResolvesToField() for the implementation, and
+    // buildPullUpPlan()'s safety measure #4 for where this is applied.
+    //
+    // Type 3 (near-miss -- bodies that genuinely differ, e.g. an added
+    // guard clause) is still out of scope: there's no single correct body
+    // to move in that case without deciding what happens to the
+    // difference, which is a design choice, not a mechanical rename.
+    //
+    // Push Down does NOT fit the (canonical, duplicate) convention — only
+    // one method is involved (sitting in the superclass), not two. Its
+    // signature is pushDown(methodName, targetSubclassName, ...) instead.
+
+    // ── Routing helper, called from CloneGuardToolWindowFactory BEFORE
+    // falling back to extract(). Does the same "same class?" / "shared
+    // non-Object superclass?" checks buildPullUpPlan() does internally, but
+    // as a cheap standalone read so the caller can decide which button-
+    // click path to take WITHOUT showing a dialog first. Returns true and
+    // fully handles the refactor (including its own confirm dialog and
+    // write action) if this pair is a genuine Pull Up case; returns false
+    // and does nothing at all — no dialog, no side effects — if it isn't,
+    // so the caller can silently fall through to extract() instead.
+    public boolean tryPullUpIfApplicable(String canonical, String duplicate, String cloneTypeLabel, java.util.function.Consumer<PsiFile> onComplete) {
+        Editor editor = FileEditorManager.getInstance(project).getSelectedTextEditor();
+        if (editor == null) return false;
+        VirtualFile vf = FileDocumentManager.getInstance().getFile(editor.getDocument());
+        if (vf == null) return false;
+        return tryPullUpIfApplicable(vf, canonical, duplicate, cloneTypeLabel, onComplete);
+    }
+
+    /**
+     * Same routing check as the no-file overload above, but against an
+     * EXPLICIT target file rather than whatever editor currently has
+     * focus. Added specifically so Scenario 1 (InlineSuggestionListener)
+     * can route its paste-detection notification through Pull Up
+     * correctly — the pasted-into file (captured as `vf` at paste time)
+     * isn't guaranteed to still be the focused editor by the time the
+     * user actually clicks the notification's action button, since
+     * notifications are asynchronous and focus can shift in between.
+     * Scenario 1's extract()/delegate() calls already take this same
+     * explicit-VirtualFile approach for exactly that reason; this
+     * overload brings Pull Up's routing check in line with that existing
+     * convention instead of silently trusting "whatever's focused now".
+     */
+    public boolean tryPullUpIfApplicable(VirtualFile targetFile, String canonical, String duplicate, String cloneTypeLabel, java.util.function.Consumer<PsiFile> onComplete) {
+        if (targetFile == null || !targetFile.isValid()) return false;
+
+        PsiDocumentManager.getInstance(project).commitAllDocuments();
+        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
+        if (psiFile == null) return false;
+
+        final String canonicalName = canonical;
+        final String duplicateName = duplicate;
+        Boolean applicable = ReadAction.compute(() -> {
+            PsiMethod[] resolvedPair = resolveDistinctPairByName(psiFile, canonicalName, duplicateName);
+            PsiMethod a = resolvedPair != null ? resolvedPair[0] : null;
+            PsiMethod b = resolvedPair != null ? resolvedPair[1] : null;
+            if (a == null || b == null) return false;
+            PsiClass classA = a.getContainingClass();
+            PsiClass classB = b.getContainingClass();
+            if (classA == null || classB == null || classA.equals(classB)) return false;
+            PsiClass superA = classA.getSuperClass();
+            PsiClass superB = classB.getSuperClass();
+            if (superA == null || superB == null || !superA.equals(superB)) return false;
+            return !"java.lang.Object".equals(superA.getQualifiedName());
+        });
+
+        if (!Boolean.TRUE.equals(applicable)) return false;
+
+        pullUp(targetFile, canonical, duplicate, cloneTypeLabel, onComplete);
+        return true;
+    }
+
+    public void pullUp(String canonical, String duplicate, String cloneTypeLabel, java.util.function.Consumer<PsiFile> onComplete) {
+        Editor editor = FileEditorManager.getInstance(project).getSelectedTextEditor();
+        if (editor == null) {
+            showDialog("No file is open in the editor.", "CloneGuard", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        VirtualFile vf = FileDocumentManager.getInstance().getFile(editor.getDocument());
+        if (vf == null) {
+            showDialog("Could not read the open file. Make sure it is saved.", "CloneGuard", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        pullUp(vf, canonical, duplicate, cloneTypeLabel, onComplete);
+    }
+
+    public void pullUp(VirtualFile targetFile, String canonical, String duplicate, String cloneTypeLabel, java.util.function.Consumer<PsiFile> onComplete) {
+        String filePath = (targetFile != null) ? targetFile.getPath() : "";
+        String pairKey = filePath + "::pullup::" + (canonical.compareTo(duplicate) < 0
+                ? canonical + "||" + duplicate
+                : duplicate + "||" + canonical);
+        Long lastAt = extractedPairs.get(pairKey);
+        if (lastAt != null && (System.currentTimeMillis() - lastAt) < EXTRACTED_PAIR_GUARD_MS) {
+            return;
+        }
+
+        if (targetFile == null || !targetFile.isValid()) {
+            showDialog("The target file is no longer available.", "CloneGuard", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        PsiDocumentManager.getInstance(project).commitAllDocuments();
+
+        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
+        if (psiFile == null) {
+            showDialog("Could not read the target file. Make sure it is saved.", "CloneGuard", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        PullUpPlan plan = ReadAction.compute(() -> buildPullUpPlan(psiFile, canonical, duplicate, cloneTypeLabel));
+
+        if (plan.aborted) {
+            showDialog(plan.abortMessage, plan.abortTitle, plan.abortMessageType);
+            return;
+        }
+
+        int choice = Messages.showYesNoDialog(plan.confirmMessage, "CloneGuard — Confirm Refactor", Messages.getQuestionIcon());
+        if (choice != Messages.YES) return;
+
+        // Of the two duplicate copies, one (methodInClassA's content)
+        // effectively just relocates into the superclass — it isn't
+        // "eliminated," it moved. It's specifically methodInClassB's
+        // copy that's the genuinely eliminated duplicate, so that's what
+        // counts here, captured before the delete happens below.
+        int duplicatedLinesEliminated = countLines(plan.methodInClassB.getText());
+
+        final boolean[] writeFailed = {false};
+        final String[] writeFailureMessage = {null};
+
+        WriteCommandAction.runWriteCommandAction(project, "CloneGuard Pull Up Method", null, () -> {
+            PsiElementFactory factory = JavaPsiFacade.getElementFactory(project);
+            PsiMethod newSuperclassMethod;
+            try {
+                newSuperclassMethod = factory.createMethodFromText(plan.methodTextForSuperclass, plan.superClass);
+            } catch (Exception ex) {
+                writeFailed[0] = true;
+                writeFailureMessage[0] = ex.getMessage();
+                return;
+            }
+
+            // Add to the superclass first, THEN delete both subclass copies —
+            // if createMethodFromText or the add() call throws, we bail out
+            // above before anything is deleted, so a failed Pull Up never
+            // leaves the codebase with the method missing from all three
+            // places at once.
+            plan.superClass.add(newSuperclassMethod);
+            plan.methodInClassA.delete();
+            plan.methodInClassB.delete();
+
+            com.intellij.psi.codeStyle.CodeStyleManager csm = com.intellij.psi.codeStyle.CodeStyleManager.getInstance(project);
+            csm.reformat(plan.superClass);
+        });
+
+        if (writeFailed[0]) {
+            showDialog(
+                    "CloneGuard's Pull Up Method refactoring failed a safety check and was NOT applied:\n\n" +
+                    writeFailureMessage[0] + "\n\nYour file was not modified.",
+                    "CloneGuard — Refactor Aborted", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        extractedPairs.put(pairKey, System.currentTimeMillis());
+        com.cloneguard.services.MetricsTrackerService.getInstance(project).recordRefactor("pullUp", duplicatedLinesEliminated, cloneTypeLabel);
+
+        showDialog(
+                "✅ Pull Up Method applied!\n\n" +
+                canonical + "() moved into " + plan.superClass.getName() + ".\n" +
+                "Both " + canonical + "() and " + duplicate + "() are now inherited from there.\n\n" +
+                "Re-scanning the file now to refresh results...",
+                "CloneGuard — Refactor Complete", JOptionPane.INFORMATION_MESSAGE);
+
+        onComplete.accept(psiFile);
+    }
+
+    private static class PullUpPlan {
+        boolean aborted;
+        String abortTitle;
+        String abortMessage;
+        int abortMessageType;
+
+        PsiClass superClass;
+        PsiMethod methodInClassA;
+        PsiMethod methodInClassB;
+        String methodTextForSuperclass;
+        String confirmMessage;
+
+        static PullUpPlan abort(String title, String message, int type) {
+            PullUpPlan p = new PullUpPlan();
+            p.aborted = true;
+            p.abortTitle = title;
+            p.abortMessage = message;
+            p.abortMessageType = type;
+            return p;
+        }
+    }
+
+    private PullUpPlan buildPullUpPlan(PsiFile psiFile, String canonical, String duplicate, String cloneTypeLabel) {
+        PsiMethod[] resolvedPair = resolveDistinctPairByName(psiFile, canonical, duplicate);
+        PsiMethod canonicalMethod = resolvedPair != null ? resolvedPair[0] : null;
+        PsiMethod duplicateMethod = resolvedPair != null ? resolvedPair[1] : null;
+        if (canonicalMethod == null || duplicateMethod == null) {
+            return PullUpPlan.abort("CloneGuard",
+                    "Could not find one or both methods (" + canonical + "(), " + duplicate + "()) in this file. " +
+                    "The file may have changed since this result was shown — try re-scanning.",
+                    JOptionPane.WARNING_MESSAGE);
+        }
+
+        PsiClass classA = canonicalMethod.getContainingClass();
+        PsiClass classB = duplicateMethod.getContainingClass();
+        if (classA == null || classB == null) {
+            return PullUpPlan.abort("CloneGuard",
+                    "Could not resolve the containing class for one or both methods. No changes were made.",
+                    JOptionPane.WARNING_MESSAGE);
+        }
+
+        // Safety measure #1: Pull Up only makes sense across two DIFFERENT
+        // sibling subclasses. If they're the same class, this isn't a Pull
+        // Up case at all — the caller should use Extract Method instead.
+        if (classA.equals(classB)) {
+            return PullUpPlan.abort("CloneGuard — Not a Pull Up Case",
+                    canonical + "() and " + duplicate + "() are both in the same class (" + classA.getName() +
+                    "). Pull Up Method only applies when the two methods live in DIFFERENT sibling subclasses " +
+                    "that share a common superclass. Try Extract Method instead. No changes were made.",
+                    JOptionPane.WARNING_MESSAGE);
+        }
+
+        // Safety measure #2: the two classes must share a real, user-defined
+        // common superclass — not just implicitly both extending
+        // java.lang.Object. Pulling a method up into Object is neither
+        // meaningful nor possible here.
+        PsiClass superClassA = classA.getSuperClass();
+        PsiClass superClassB = classB.getSuperClass();
+        if (superClassA == null || superClassB == null || !superClassA.equals(superClassB)
+                || "java.lang.Object".equals(superClassA.getQualifiedName())) {
+            return PullUpPlan.abort("CloneGuard — Not a Pull Up Case",
+                    classA.getName() + " and " + classB.getName() + " do not share a common user-defined superclass. " +
+                    "Pull Up Method requires both classes to directly extend the same parent class. No changes were made.",
+                    JOptionPane.WARNING_MESSAGE);
+        }
+        PsiClass superClass = superClassA;
+
+        PsiCodeBlock bodyA = canonicalMethod.getBody();
+        PsiCodeBlock bodyB = duplicateMethod.getBody();
+        if (bodyA == null || bodyB == null) {
+            return PullUpPlan.abort("CloneGuard",
+                    "One of the methods has no body (e.g. abstract or interface method) — cannot pull up.",
+                    JOptionPane.WARNING_MESSAGE);
+        }
+
+        // Safety measure #3: signature compatibility (same param types
+        // positionally, same return type) — the superclass will only have
+        // ONE version of this method, so both subclasses' call sites must
+        // already agree on the contract.
+        PsiParameter[] paramsA = canonicalMethod.getParameterList().getParameters();
+        PsiParameter[] paramsB = duplicateMethod.getParameterList().getParameters();
+        PsiType returnA = canonicalMethod.getReturnType();
+        PsiType returnB = duplicateMethod.getReturnType();
+        if (!signaturesCompatible(paramsA, returnA, paramsB, returnB)) {
+            return PullUpPlan.abort("CloneGuard — Cannot Pull Up Safely",
+                    canonical + "() and " + duplicate + "() do not have compatible signatures (parameter types or " +
+                    "return type differ). Pull Up Method needs one identical signature both subclasses can inherit. " +
+                    "No changes were made.",
+                    JOptionPane.WARNING_MESSAGE);
+        }
+
+        // Safety measure #4 (SCOPE now covers Type 1 AND Type 2):
+        //
+        // Type 1 (exact match) is handled first, same as before -- if the
+        // two bodies are byte-for-byte identical after whitespace
+        // normalization, there's nothing further to check here.
+        //
+        // Type 2 (renamed identifiers) is now ALSO accepted, but only
+        // under one condition: every identifier that differs between the
+        // two bodies must be a LOCAL VARIABLE or PARAMETER, never a
+        // FIELD. This distinction is what actually matters, not renaming
+        // in general -- a local variable is invisible outside the method
+        // it's declared in, so canonicalMethod's own text (with its own
+        // local names) is already fully self-consistent and 100% safe to
+        // move as-is, regardless of what classB's copy happened to call
+        // the same local. A renamed FIELD is a different situation
+        // entirely: it means the two subclasses are backed by genuinely
+        // different pieces of state (e.g. Dog.breed vs Cat.species), and
+        // silently picking one over the other when moving the method up
+        // would be a real behavior change, not just a rename. That case
+        // is refused, same as before, rather than guessed at.
+        String normalizedA = bodyA.getText().replaceAll("\\s+", " ").trim();
+        String normalizedB = bodyB.getText().replaceAll("\\s+", " ").trim();
+        boolean isExactMatch = normalizedA.equals(normalizedB);
+        String detectedCloneKind = "Type 1 (exact match)";
+
+        if (!isExactMatch) {
+            Map<String, String> renameMapping = buildFullBodyIdentifierMapping(
+                    bodyA.getStatements(), bodyB.getStatements());
+            if (renameMapping == null) {
+                return PullUpPlan.abort("CloneGuard — Cannot Pull Up Safely",
+                        canonical + "() and " + duplicate + "() are not structurally equivalent, even allowing for " +
+                        "renamed identifiers (different statement count or shape). Pull Up Method supports exact " +
+                        "Type 1 clones and Type 2 clones where every difference is a renamed LOCAL variable or " +
+                        "parameter. No changes were made.",
+                        JOptionPane.WARNING_MESSAGE);
+            }
+            for (Map.Entry<String, String> entry : renameMapping.entrySet()) {
+                String nameInA = entry.getKey();
+                String nameInB = entry.getValue();
+                if (nameInA.equals(nameInB)) continue; // same name -- not actually renamed
+                if (identifierResolvesToField(bodyA, nameInA) || identifierResolvesToField(bodyB, nameInB)) {
+                    return PullUpPlan.abort("CloneGuard — Cannot Pull Up Safely",
+                            canonical + "() and " + duplicate + "() are structurally identical except for renamed " +
+                            "identifiers, but \"" + nameInA + "\" / \"" + nameInB + "\" resolves to a FIELD, not a " +
+                            "local variable. Pulling up would silently pick one subclass's field over the other's " +
+                            "-- CloneGuard only auto-applies Type 2 Pull Up when every difference is a local " +
+                            "variable or parameter name. No changes were made.",
+                            JOptionPane.WARNING_MESSAGE);
+                }
+            }
+            detectedCloneKind = "Type 2 (renamed local variables)";
+        }
+
+        // Safety measure #5: the method must not depend on anything that
+        // only exists on classA specifically (a field or another method
+        // declared directly on classA, not inherited from the superclass
+        // or above). If it does, moving it up would break compilation for
+        // classB, which never had that member in the first place. Checked
+        // from BOTH sides — the two bodies are textually identical, but
+        // identifiers inside them resolve independently in each class's
+        // scope.
+        String dependencyErrorA = findSubclassOnlyDependency(canonicalMethod, bodyA, classA);
+        if (dependencyErrorA != null) {
+            return PullUpPlan.abort("CloneGuard — Cannot Pull Up Safely",
+                    canonical + "() references " + dependencyErrorA + ", which only exists on " + classA.getName() +
+                    " — moving this method to " + superClass.getName() + " would break " + classB.getName() +
+                    ", which has no such member. No changes were made.",
+                    JOptionPane.WARNING_MESSAGE);
+        }
+        String dependencyErrorB = findSubclassOnlyDependency(duplicateMethod, bodyB, classB);
+        if (dependencyErrorB != null) {
+            return PullUpPlan.abort("CloneGuard — Cannot Pull Up Safely",
+                    duplicate + "() references " + dependencyErrorB + ", which only exists on " + classB.getName() +
+                    " — moving this method to " + superClass.getName() + " would break " + classA.getName() +
+                    ", which has no such member. No changes were made.",
+                    JOptionPane.WARNING_MESSAGE);
+        }
+
+        // Safety measure #6: the superclass must not already declare a
+        // method with this same name and signature — that would be an
+        // unintended override collision, not a clean Pull Up.
+        for (PsiMethod existing : superClass.getMethods()) {
+            if (existing.getName().equals(canonicalMethod.getName())
+                    && signaturesCompatible(existing.getParameterList().getParameters(), existing.getReturnType(), paramsA, returnA)) {
+                return PullUpPlan.abort("CloneGuard — Cannot Pull Up Safely",
+                        superClass.getName() + " already declares a method named " + canonical + "() with a matching " +
+                        "signature. Pulling up would silently collide with it. No changes were made.",
+                        JOptionPane.WARNING_MESSAGE);
+            }
+        }
+
+        String confirmMessage =
+                "CloneGuard found a " + cloneTypeLabel + " across sibling subclasses:\n\n" +
+                // FIX (found live, testing): canonical/duplicate can
+                // already be class-qualified ("Dog.describe") whenever
+                // extractFunctions() had to disambiguate a name collision
+                // -- concatenating classA.getName() + "." + canonical in
+                // that case doubled the prefix ("Dog.Dog.describe()").
+                // Using the method's own bare getName() here instead of
+                // the raw parameter guarantees exactly one prefix
+                // regardless of which format the caller passed in.
+                "  " + classA.getName() + "." + canonicalMethod.getName() + "()  ↔  " + classB.getName() + "." + duplicateMethod.getName() + "()\n\n" +
+                "Detected as: " + detectedCloneKind + ". Both extend " + superClass.getName() + ".\n\n" +
+                "Proposed refactoring (Pull Up Method):\n" +
+                "  • " + canonicalMethod.getName() + "() moves into " + superClass.getName() +
+                (isExactMatch ? "" : ", using " + classA.getName() + "'s local variable names") + "\n" +
+                "  • The copies in " + classA.getName() + " and " + classB.getName() + " are removed\n" +
+                "  • Both subclasses now inherit the single shared implementation\n\n" +
+                "Apply this refactoring now?";
+
+        PullUpPlan plan = new PullUpPlan();
+        plan.aborted = false;
+        plan.superClass = superClass;
+        plan.methodInClassA = canonicalMethod;
+        plan.methodInClassB = duplicateMethod;
+        plan.methodTextForSuperclass = canonicalMethod.getText();
+        plan.confirmMessage = confirmMessage;
+        return plan;
+    }
+
+    /**
+     * Scans a method body for references to fields or methods that are
+     * declared directly on `owningClass` itself (not inherited from
+     * anything above it) — i.e. members the OTHER sibling subclass
+     * wouldn't have. Returns a human-readable description of the first
+     * such dependency found, or null if the method is safe to move up.
+     */
+    private String findSubclassOnlyDependency(PsiMethod method, PsiCodeBlock body, PsiClass owningClass) {
+        for (PsiReferenceExpression ref : PsiTreeUtil.findChildrenOfType(body, PsiReferenceExpression.class)) {
+            PsiElement resolved = ref.resolve();
+            if (resolved == null) continue;
+
+            if (resolved instanceof PsiField) {
+                PsiField field = (PsiField) resolved;
+                PsiClass fieldOwner = field.getContainingClass();
+                if (fieldOwner != null && fieldOwner.equals(owningClass)) {
+                    return "field \"" + field.getName() + "\"";
+                }
+            } else if (resolved instanceof PsiMethod) {
+                PsiMethod calledMethod = (PsiMethod) resolved;
+                if (calledMethod.equals(method)) continue; // recursive self-call is fine
+                PsiClass methodOwner = calledMethod.getContainingClass();
+                if (methodOwner != null && methodOwner.equals(owningClass)) {
+                    return "method \"" + calledMethod.getName() + "()\"";
+                }
+            }
+        }
+        return null;
+    }
+
+
+    // ── Push Down Method ────────────────────────────────────────────────
+    // NOTE on calling convention: unlike pullUp()/extract()/delegate(),
+    // this is NOT a (canonical, duplicate) pair — there's only one method
+    // involved, currently sitting in a superclass, being moved down into
+    // ONE named subclass.
+
+    public void pushDown(String methodName, String targetSubclassName, java.util.function.Consumer<PsiFile> onComplete) {
+        Editor editor = FileEditorManager.getInstance(project).getSelectedTextEditor();
+        if (editor == null) {
+            showDialog("No file is open in the editor.", "CloneGuard", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        VirtualFile vf = FileDocumentManager.getInstance().getFile(editor.getDocument());
+        if (vf == null) {
+            showDialog("Could not read the open file. Make sure it is saved.", "CloneGuard", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        pushDown(vf, methodName, targetSubclassName, onComplete);
+    }
+
+    public void pushDown(VirtualFile targetFile, String methodName, String targetSubclassName, java.util.function.Consumer<PsiFile> onComplete) {
+        String filePath = (targetFile != null) ? targetFile.getPath() : "";
+        String pairKey = filePath + "::pushdown::" + methodName + "||" + targetSubclassName;
+        Long lastAt = extractedPairs.get(pairKey);
+        if (lastAt != null && (System.currentTimeMillis() - lastAt) < EXTRACTED_PAIR_GUARD_MS) {
+            return;
+        }
+
+        if (targetFile == null || !targetFile.isValid()) {
+            showDialog("The target file is no longer available.", "CloneGuard", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        PsiDocumentManager.getInstance(project).commitAllDocuments();
+
+        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
+        if (psiFile == null) {
+            showDialog("Could not read the target file. Make sure it is saved.", "CloneGuard", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        PushDownPlan plan = ReadAction.compute(() -> buildPushDownPlan(psiFile, methodName, targetSubclassName));
+
+        if (plan.aborted) {
+            showDialog(plan.abortMessage, plan.abortTitle, plan.abortMessageType);
+            return;
+        }
+
+        int choice = Messages.showYesNoDialog(plan.confirmMessage, "CloneGuard — Confirm Refactor", Messages.getQuestionIcon());
+        if (choice != Messages.YES) return;
+
+        final boolean[] writeFailed = {false};
+        final String[] writeFailureMessage = {null};
+
+        WriteCommandAction.runWriteCommandAction(project, "CloneGuard Push Down Method", null, () -> {
+            PsiElementFactory factory = JavaPsiFacade.getElementFactory(project);
+            PsiMethod newSubclassMethod;
+            try {
+                newSubclassMethod = factory.createMethodFromText(plan.methodTextForSubclass, plan.targetSubclass);
+            } catch (Exception ex) {
+                writeFailed[0] = true;
+                writeFailureMessage[0] = ex.getMessage();
+                return;
+            }
+
+            // Same ordering principle as Pull Up: add the new copy FIRST,
+            // only delete the superclass original if that succeeds, so a
+            // failed Push Down never leaves the method missing everywhere.
+            plan.targetSubclass.add(newSubclassMethod);
+            plan.methodInSuperclass.delete();
+
+            com.intellij.psi.codeStyle.CodeStyleManager csm = com.intellij.psi.codeStyle.CodeStyleManager.getInstance(project);
+            csm.reformat(plan.targetSubclass);
+        });
+
+        if (writeFailed[0]) {
+            showDialog(
+                    "CloneGuard's Push Down Method refactoring failed a safety check and was NOT applied:\n\n" +
+                    writeFailureMessage[0] + "\n\nYour file was not modified.",
+                    "CloneGuard — Refactor Aborted", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        extractedPairs.put(pairKey, System.currentTimeMillis());
+        // Push Down isn't a duplication fix — there was only ever one
+        // copy of the method — so 0 duplicated lines eliminated is the
+        // honest number here. It still counts toward the refactor-type
+        // breakdown on the dashboard.
+        com.cloneguard.services.MetricsTrackerService.getInstance(project).recordRefactor("pushDown", 0);
+
+        showDialog(
+                "✅ Push Down Method applied!\n\n" +
+                methodName + "() moved out of " + plan.superClass.getName() + " into " + targetSubclassName + ".\n" +
+                "Other subclasses of " + plan.superClass.getName() + " no longer inherit it.\n\n" +
+                "Re-scanning the file now to refresh results...",
+                "CloneGuard — Refactor Complete", JOptionPane.INFORMATION_MESSAGE);
+
+        onComplete.accept(psiFile);
+    }
+
+    private static class PushDownPlan {
+        boolean aborted;
+        String abortTitle;
+        String abortMessage;
+        int abortMessageType;
+
+        PsiClass superClass;
+        PsiClass targetSubclass;
+        PsiMethod methodInSuperclass;
+        String methodTextForSubclass;
+        String confirmMessage;
+
+        static PushDownPlan abort(String title, String message, int type) {
+            PushDownPlan p = new PushDownPlan();
+            p.aborted = true;
+            p.abortTitle = title;
+            p.abortMessage = message;
+            p.abortMessageType = type;
+            return p;
+        }
+    }
+
+    private PushDownPlan buildPushDownPlan(PsiFile psiFile, String methodName, String targetSubclassName) {
+        PsiMethod methodInSuperclass = resolveMethodByName(psiFile, methodName);
+        if (methodInSuperclass == null) {
+            return PushDownPlan.abort("CloneGuard",
+                    "Could not find method " + methodName + "() in this file. The file may have changed since this " +
+                    "result was shown — try re-scanning.",
+                    JOptionPane.WARNING_MESSAGE);
+        }
+
+        PsiClass superClass = methodInSuperclass.getContainingClass();
+        if (superClass == null) {
+            return PushDownPlan.abort("CloneGuard",
+                    "Could not resolve the containing class for " + methodName + "(). No changes were made.",
+                    JOptionPane.WARNING_MESSAGE);
+        }
+
+        PsiClass targetSubclass = null;
+        for (PsiClass candidate : PsiTreeUtil.findChildrenOfType(psiFile, PsiClass.class)) {
+            if (candidate.getName() != null && candidate.getName().equals(targetSubclassName)) {
+                targetSubclass = candidate;
+                break;
+            }
+        }
+        if (targetSubclass == null) {
+            return PushDownPlan.abort("CloneGuard",
+                    "Could not find a class named " + targetSubclassName + " in this file. No changes were made.",
+                    JOptionPane.WARNING_MESSAGE);
+        }
+
+        // Safety measure #1: targetSubclass must actually be a DIRECT
+        // subclass of the class that currently declares the method.
+        PsiClass targetsSuper = targetSubclass.getSuperClass();
+        if (targetsSuper == null || !targetsSuper.equals(superClass)) {
+            return PushDownPlan.abort("CloneGuard — Not a Push Down Case",
+                    targetSubclassName + " does not directly extend " + superClass.getName() + ", which is where " +
+                    methodName + "() is currently declared. No changes were made.",
+                    JOptionPane.WARNING_MESSAGE);
+        }
+
+        PsiCodeBlock body = methodInSuperclass.getBody();
+        if (body == null) {
+            return PushDownPlan.abort("CloneGuard",
+                    methodName + "() has no body (e.g. abstract) — nothing to push down. No changes were made.",
+                    JOptionPane.WARNING_MESSAGE);
+        }
+
+        // Safety measure #2 (the important one): search the WHOLE file for
+        // any reference to this method from OUTSIDE targetSubclass —
+        // including from other sibling subclasses, from the superclass
+        // itself, or from any unrelated class. If anything else still
+        // calls it, pushing it down would break that caller, since the
+        // method would no longer be visible/inherited there. Uses
+        // IntelliJ's own reference search rather than a hand-rolled text
+        // scan, so it correctly finds calls through a superclass-typed
+        // variable too, not just literal textual matches.
+        List<PsiReference> externalReferences = new ArrayList<>();
+        for (PsiReference ref : com.intellij.psi.search.searches.ReferencesSearch.search(methodInSuperclass).findAll()) {
+            PsiElement refElement = ref.getElement();
+            PsiClass refOwningClass = PsiTreeUtil.getParentOfType(refElement, PsiClass.class);
+            boolean isInsideTargetSubclass = refOwningClass != null
+                    && (refOwningClass.equals(targetSubclass) || PsiTreeUtil.isAncestor(targetSubclass, refOwningClass, false));
+            boolean isInsideTheMethodItself = PsiTreeUtil.isAncestor(methodInSuperclass, refElement, false);
+            if (!isInsideTargetSubclass && !isInsideTheMethodItself) {
+                externalReferences.add(ref);
+            }
+        }
+        if (!externalReferences.isEmpty()) {
+            return PushDownPlan.abort("CloneGuard — Cannot Push Down Safely",
+                    methodName + "() is still referenced from outside " + targetSubclassName + " (" +
+                    externalReferences.size() + " other call site" + (externalReferences.size() == 1 ? "" : "s") +
+                    " found). Pushing it down would break those callers, since it would no longer be inherited " +
+                    "there. No changes were made.",
+                    JOptionPane.WARNING_MESSAGE);
+        }
+
+        // Safety measure #3: targetSubclass must not already declare its
+        // own method with this same signature — pushing down would
+        // silently collide with (and likely shadow or conflict with) an
+        // existing one.
+        PsiParameter[] superParams = methodInSuperclass.getParameterList().getParameters();
+        PsiType superReturn = methodInSuperclass.getReturnType();
+        for (PsiMethod existing : targetSubclass.getMethods()) {
+            if (existing.getName().equals(methodName)
+                    && signaturesCompatible(existing.getParameterList().getParameters(), existing.getReturnType(), superParams, superReturn)) {
+                return PushDownPlan.abort("CloneGuard — Cannot Push Down Safely",
+                        targetSubclassName + " already declares its own " + methodName + "() with a matching " +
+                        "signature. Pushing down would collide with it. No changes were made.",
+                        JOptionPane.WARNING_MESSAGE);
+            }
+        }
+
+        String confirmMessage =
+                "CloneGuard analysis: " + methodName + "() is declared on " + superClass.getName() + " but is only " +
+                "ever used from " + targetSubclassName + ".\n\n" +
+                "Proposed refactoring (Push Down Method):\n" +
+                "  • " + methodName + "() moves out of " + superClass.getName() + "\n" +
+                "  • It's added directly to " + targetSubclassName + " instead\n" +
+                "  • Other subclasses of " + superClass.getName() + " no longer inherit it\n\n" +
+                "Apply this refactoring now?";
+
+        PushDownPlan plan = new PushDownPlan();
+        plan.aborted = false;
+        plan.superClass = superClass;
+        plan.targetSubclass = targetSubclass;
+        plan.methodInSuperclass = methodInSuperclass;
+        plan.methodTextForSubclass = methodInSuperclass.getText();
+        plan.confirmMessage = confirmMessage;
+        return plan;
     }
 
 }

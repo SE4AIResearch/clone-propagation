@@ -2,6 +2,7 @@ package com.cloneguard.listeners;
 
 import com.cloneguard.model.CloneResult;
 import com.cloneguard.model.CloneType;
+import com.cloneguard.model.PushDownCandidate;
 import com.cloneguard.refactor.ExtractMethodEngine;
 import com.cloneguard.services.CloneIndexService;
 import com.cloneguard.services.PythonServerClient;
@@ -41,6 +42,14 @@ public class InlineSuggestionListener implements EditorFactoryListener {
             });
 
     private final Map<Editor, ScheduledFuture<?>> reindexJobs = new ConcurrentHashMap<>();
+
+    // Dedup for Scenario 1's Push Down notifications -- keyed by file path
+    // + method + superclass + target subclass, so the same candidate isn't
+    // re-notified on every subsequent paste in the same file. Cleared
+    // implicitly per-IDE-session (in-memory only); a candidate that gets
+    // actually pushed down will naturally stop being found by the next
+    // scan anyway, so there's no need to explicitly remove entries here.
+    private final Set<String> shownPushDownCandidates = ConcurrentHashMap.newKeySet();
 
     @Override
     public void editorCreated(@NotNull EditorFactoryEvent event) {
@@ -184,7 +193,97 @@ public class InlineSuggestionListener implements EditorFactoryListener {
                 // extension-point fragility.
                 showRefactorNotification(editor, duplicateMethodName, finalResult);
             }
+
+            // EXTENDED (Scenario 1/3 parity request): Push Down doesn't
+            // have a natural paste trigger the way clone detection does --
+            // it's not about the PASTED code being a duplicate at all, it's
+            // static analysis over the whole file looking for a method
+            // that's misplaced too high in the class hierarchy. Rather than
+            // scan the whole file on EVERY keystroke-adjacent paste (a real
+            // performance concern for Layer 1's <10ms design budget — see
+            // the paper), this deliberately only runs piggybacked on a
+            // paste that ALREADY triggered the more expensive dialog-
+            // showing path above, bounding the added cost to cases where
+            // CloneGuard was already doing non-trivial work regardless.
+            checkForNewPushDownCandidates(editor, project);
         });
+    }
+
+    /**
+     * Runs FileScannerService.findPushDownCandidates() over the whole file
+     * in the background (never on the EDT — a full-file reference search
+     * is real work, unlike the paste-triggered clone check this piggybacks
+     * on), and shows a separate notification for any candidate not already
+     * shown this session. Mirrors showRefactorNotification()'s own
+     * notification pattern, with its own "Push Down →" action wired to
+     * ExtractMethodEngine.pushDown() the same way Scenario 2's tool window
+     * button already does.
+     */
+    private void checkForNewPushDownCandidates(Editor editor, Project project) {
+        VirtualFile vf = FileDocumentManager.getInstance().getFile(editor.getDocument());
+        if (vf == null) return;
+
+        scheduler.schedule(() -> {
+            List<PushDownCandidate> candidates;
+            try {
+                candidates = ApplicationManager.getApplication().runReadAction(
+                        (com.intellij.openapi.util.Computable<List<PushDownCandidate>>) () -> {
+                            PsiFile psiFile = PsiManager.getInstance(project).findFile(vf);
+                            if (psiFile == null) return java.util.Collections.emptyList();
+                            FileScannerService scanner = project.getService(FileScannerService.class);
+                            if (scanner == null) return java.util.Collections.emptyList();
+                            return scanner.findPushDownCandidates(psiFile);
+                        });
+            } catch (Exception e) {
+                LOG.warn("CloneGuard: push-down check failed: " + e.getMessage());
+                return;
+            }
+
+            for (PushDownCandidate candidate : candidates) {
+                String dedupKey = vf.getPath() + "::" + candidate.methodName + "::"
+                        + candidate.superClassName + "::" + candidate.targetSubclassName;
+                if (!shownPushDownCandidates.add(dedupKey)) {
+                    continue; // already shown this session
+                }
+                ApplicationManager.getApplication().invokeLater(() ->
+                        showPushDownNotification(project, vf, candidate));
+            }
+        }, 500, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * Same notification shape as showRefactorNotification(), for a single
+     * Push Down candidate. Uses the explicit-VirtualFile overload of
+     * pushDown() for the same reason Pull Up's routing does — the file
+     * this candidate was found in isn't guaranteed to still be the
+     * focused editor by the time the user clicks the action.
+     */
+    private void showPushDownNotification(Project project, VirtualFile vf, PushDownCandidate candidate) {
+        Notification notification = new Notification(
+                "CloneGuard",
+                "CloneGuard — Push Down Opportunity",
+                candidate.getSummary() + ". Consider moving it down.",
+                NotificationType.INFORMATION
+        );
+
+        notification.addAction(new AnAction("Push Down \u2192") {
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                ExtractMethodEngine.getInstance(project).pushDown(
+                        vf, candidate.methodName, candidate.targetSubclassName,
+                        (updatedFile) -> notification.expire());
+            }
+        });
+
+        notification.addAction(new AnAction("Dismiss") {
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                notification.expire();
+            }
+        });
+
+        notification.notify(project);
+        LOG.info("CloneGuard: push-down notification shown for " + candidate.getSummary());
     }
 
     /**
@@ -253,14 +352,32 @@ public class InlineSuggestionListener implements EditorFactoryListener {
                     // with no fallback, unlike Scenario 2's tool window,
                     // which was given a Delegate route earlier this session.
                     // Route the same way here for parity.
+                    //
+                    // EXTENDED (Scenario 1/3 parity request): for Type 1/2/3
+                    // pairs, this now ALSO tries Pull Up first, before
+                    // falling back to Extract Method -- exactly mirroring
+                    // CloneGuardToolWindowFactory.triggerRefactor()'s same
+                    // two-step routing in Scenario 2. Uses the explicit-
+                    // VirtualFile overload (not the editor-focus-based one)
+                    // since `vf` is the file that was actually pasted into
+                    // at the time this notification was built, which isn't
+                    // guaranteed to still be the focused editor by the time
+                    // the user clicks this button -- notifications are
+                    // asynchronous, and focus can shift in between.
+                    ExtractMethodEngine engine = ExtractMethodEngine.getInstance(project);
                     if (result.cloneType == CloneType.TYPE_4) {
-                        ExtractMethodEngine.getInstance(project).delegate(
+                        engine.delegate(
                                 vf, canonicalName, duplicateName, cloneTypeLabel,
                                 (updatedFile) -> notification.expire());
                     } else {
-                        ExtractMethodEngine.getInstance(project).extract(
+                        boolean handledAsPullUp = engine.tryPullUpIfApplicable(
                                 vf, canonicalName, duplicateName, cloneTypeLabel,
                                 (updatedFile) -> notification.expire());
+                        if (!handledAsPullUp) {
+                            engine.extract(
+                                    vf, canonicalName, duplicateName, cloneTypeLabel,
+                                    (updatedFile) -> notification.expire());
+                        }
                     }
                 }
             });
@@ -362,9 +479,45 @@ public class InlineSuggestionListener implements EditorFactoryListener {
      * document state that could shift by the time it's used.
      */
     private String extractMethodNameFromCode(String code) {
+        // FIX (found live, Scenario 1 Type 1 test — sumValuesExact): this
+        // mirrors the exact same bug already found and fixed server-side
+        // in get_return_type_shared() (server.py) earlier this session.
+        // This regex used to run unanchored over the ENTIRE pasted text.
+        // That's unsound the moment the pasted method has no explicit
+        // modifier (public/private/etc.) -- e.g. a package-private
+        // "int sumValuesExact(int[] arr) {" -- because the leading
+        // (?:modifiers|\s)+ group then has nothing valid to anchor on AT
+        // the real signature, so find() skips straight past it and
+        // instead matches the first coincidental "TYPE NAME(" shape found
+        // ANYWHERE in the body.
+        //
+        // For gcdRecursive() this accidentally landed on its own
+        // recursive call, return gcdRecursive(b, a % b);, and by pure
+        // coincidence still extracted the right name -- which is exactly
+        // why THAT notification worked while this one silently didn't.
+        // sumValuesExact() has no recursive call to accidentally rescue
+        // it, so no match was found anywhere at all: this method returned
+        // null, and showRefactorNotification()'s
+        // `if (duplicateName == null) return;` guard bailed out silently
+        // -- no error, nothing visible, just a notification that never
+        // appeared.
+        //
+        // Fix: isolate just the SIGNATURE portion -- everything up to the
+        // first top-level "{" -- before running the regex at all, same
+        // approach as the server-side fix. A Java method's signature can
+        // never itself contain a literal "{", so this guarantees the
+        // regex only ever sees the real signature, never anything from
+        // inside the body. Combined with changing the leading modifiers
+        // group from + to * (so it can validly match ZERO modifiers), a
+        // package-private signature now matches correctly starting at its
+        // true first character, instead of only ever being reachable --
+        // by luck -- via a coincidental match somewhere in the body.
+        int braceIdx = code.indexOf('{');
+        String signatureOnly = (braceIdx != -1) ? code.substring(0, braceIdx) : code;
+
         java.util.regex.Matcher m = Pattern.compile(
-                "(?:public|private|protected|static|final|\\s)+\\s*(?:\\w+(?:<[^>]*>)?(?:\\[\\])?)\\s+(\\w+)\\s*\\("
-        ).matcher(code);
+                "(?:public|private|protected|static|final|\\s)*\\s*(?:\\w+(?:<[^>]*>)?(?:\\[\\])?)\\s+(\\w+)\\s*\\("
+        ).matcher(signatureOnly);
         return m.find() ? m.group(1) : null;
     }
 

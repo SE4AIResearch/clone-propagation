@@ -2,6 +2,7 @@ package com.cloneguard.ui;
 
 import com.cloneguard.model.CloneGroup;
 import com.cloneguard.model.CloneType;
+import com.cloneguard.model.PushDownCandidate;
 import com.cloneguard.services.FileScannerService;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ReadAction;
@@ -25,12 +26,22 @@ import java.util.List;
  * SCENARIO 2 — CloneGuard Tool Window
  *
  * Appears at the bottom of the IDE (like the Terminal tab).
- * Shows all clone groups found by the file scanner.
- * Each group has a [Refactor →] button that actually rewrites the code.
+ * Shows all clone groups found by the file scanner, PLUS any Push Down
+ * Method candidates found by the same scan (see FileScannerService.
+ * findPushDownCandidates() — a separate, independent analysis from clone
+ * detection, since Push Down isn't about two duplicated methods, it's
+ * about one method declared too high in a class hierarchy).
+ *
+ * Each clone group has a [Refactor →] button that actually rewrites the
+ * code — that button now auto-routes to Pull Up Method first when the pair
+ * qualifies (see triggerRefactor() below), falling back to Extract Method
+ * or Method Delegation otherwise. Each push-down candidate has its own
+ * [Push Down →] button.
  */
 public class CloneGuardToolWindowFactory implements ToolWindowFactory {
 
     private static ScanResultsPanel panel;
+    private static TrendDashboardPanel trendDashboardPanel;
 
     @Override
     public void createToolWindowContent(@NotNull Project project, @NotNull ToolWindow toolWindow) {
@@ -39,16 +50,61 @@ public class CloneGuardToolWindowFactory implements ToolWindowFactory {
                 toolWindow.getContentManager().getFactory()
                         .createContent(panel.getRoot(), "Scan Results", false)
         );
+
+        // Trend Dashboard — a second tab in the same tool window, showing
+        // the before/after quality trend tracked by MetricsTrackerService.
+        // Loads once here at tool window creation, then again via its own
+        // Refresh button, or automatically right after every scan (see
+        // refreshTrendDashboard() below, called from ScanFileAction).
+        trendDashboardPanel = new TrendDashboardPanel(project);
+        toolWindow.getContentManager().addContent(
+                toolWindow.getContentManager().getFactory()
+                        .createContent(trendDashboardPanel.getRoot(), "Trend Dashboard", false)
+        );
     }
 
-    public static void showResults(Project project, List<CloneGroup> groups, String fileName) {
+    /**
+     * Called from ScanFileAction right after every scan attempt — a new
+     * scan starting is exactly the moment MetricsTrackerService finalizes
+     * and writes the PREVIOUS session, so that's the only point new trend
+     * data can actually exist. Takes the scanned file's name so the
+     * dashboard can filter to THAT file's history specifically — see
+     * TrendDashboardPanel.setCurrentFile().
+     *
+     * FIX (found live, per-file dashboard testing): this used to only
+     * update the panel's internal data via setCurrentFile() -- it never
+     * actually made the CloneGuard tool window itself visible or
+     * focused, unlike showResults() below, which explicitly calls
+     * toolWindow.show() + activate(). That meant the "need at least 2
+     * functions" early-return path in ScanFileAction (the only caller
+     * that reaches this method WITHOUT also calling showResults()
+     * afterward) could correctly update the dashboard's data behind the
+     * scenes, with the user having no visible indication it happened at
+     * all if the tool window was closed or unfocused at the time.
+     * Confirmed live: "the panel doesn't show up" after a rescan that
+     * hit that guard. Now mirrors showResults()'s own show+activate
+     * calls, so every path that refreshes the dashboard also guarantees
+     * the user can actually see it.
+     */
+    public static void refreshTrendDashboard(Project project, String fileName) {
+        ToolWindow toolWindow = ToolWindowManager.getInstance(project).getToolWindow("CloneGuard");
+        if (toolWindow != null) {
+            toolWindow.show();
+            toolWindow.activate(null);
+        }
+        if (trendDashboardPanel != null) {
+            trendDashboardPanel.setCurrentFile(fileName);
+        }
+    }
+
+    public static void showResults(Project project, List<CloneGroup> groups, List<PushDownCandidate> pushDownCandidates, String fileName) {
         ToolWindow toolWindow = ToolWindowManager.getInstance(project).getToolWindow("CloneGuard");
         if (toolWindow != null) {
             toolWindow.show();
             toolWindow.activate(null);
         }
         if (panel != null) {
-            panel.displayResults(groups, fileName);
+            panel.displayResults(groups, pushDownCandidates, fileName);
         }
     }
 }
@@ -61,13 +117,18 @@ class ScanResultsPanel {
     private final JLabel  summaryLabel;
     private String        currentFileName = "";
 
-    // Tracks every "Delegate →" button currently on screen. The moment ANY
-    // one of them is clicked, all of them are disabled immediately — this
-    // is what stops a user from clicking a second refactor button against
-    // scan results that are already stale because the first click already
+    // Tracks every refactor-triggering button currently on screen — both
+    // clone-group "Extract/Delegate →" buttons AND push-down candidate
+    // "Push Down →" buttons share this same list. The moment ANY one of
+    // them is clicked, ALL of them are disabled immediately — this is what
+    // stops a user from clicking a second refactor button against scan
+    // results that are already stale because the first click already
     // modified the file. Without this, clicking multiple refactor buttons
     // in a row (before a re-scan runs) was producing duplicate helper
-    // methods and unreachable-code compile errors.
+    // methods and unreachable-code compile errors. Push Down candidates
+    // are just as vulnerable to this same staleness problem as clone
+    // groups are, so they're tracked in the same list rather than a
+    // separate one.
     private final List<JButton> activeRefactorButtons = new ArrayList<>();
 
     ScanResultsPanel(Project project) {
@@ -101,22 +162,49 @@ class ScanResultsPanel {
 
     JPanel getRoot() { return root; }
 
-    void displayResults(List<CloneGroup> groups, String fileName) {
+    void displayResults(List<CloneGroup> groups, List<PushDownCandidate> pushDownCandidates, String fileName) {
         resultsContainer.removeAll();
         activeRefactorButtons.clear();
         currentFileName = fileName;
 
-        if (groups.isEmpty()) {
-            summaryLabel.setText("✅ No clones found in " + fileName);
-            JLabel empty = new JLabel("No clone groups detected. Your code is clean!");
+        boolean hasGroups = groups != null && !groups.isEmpty();
+        boolean hasPushDown = pushDownCandidates != null && !pushDownCandidates.isEmpty();
+
+        if (!hasGroups && !hasPushDown) {
+            summaryLabel.setText("✅ No clones or push-down candidates found in " + fileName);
+            JLabel empty = new JLabel("Nothing found. Your code is clean!");
             empty.setForeground(JBColor.GREEN.darker());
             empty.setBorder(new EmptyBorder(16, 0, 0, 0));
             resultsContainer.add(empty);
         } else {
-            summaryLabel.setText("⚠️ " + groups.size() + " clone group(s) found in " + fileName);
-            for (int i = 0; i < groups.size(); i++) {
-                resultsContainer.add(buildGroupCard(groups.get(i), i + 1));
-                resultsContainer.add(Box.createVerticalStrut(8));
+            int groupCount = hasGroups ? groups.size() : 0;
+            int pushDownCount = hasPushDown ? pushDownCandidates.size() : 0;
+            summaryLabel.setText("⚠️ " + groupCount + " clone group(s), " + pushDownCount +
+                    " push-down candidate(s) found in " + fileName);
+
+            if (hasGroups) {
+                JLabel sectionLabel = new JLabel("Clone Groups");
+                sectionLabel.setFont(sectionLabel.getFont().deriveFont(Font.BOLD, 12f));
+                sectionLabel.setForeground(JBColor.GRAY);
+                sectionLabel.setBorder(new EmptyBorder(0, 2, 6, 0));
+                resultsContainer.add(sectionLabel);
+                for (int i = 0; i < groups.size(); i++) {
+                    resultsContainer.add(buildGroupCard(groups.get(i), i + 1));
+                    resultsContainer.add(Box.createVerticalStrut(8));
+                }
+            }
+
+            if (hasPushDown) {
+                if (hasGroups) resultsContainer.add(Box.createVerticalStrut(10));
+                JLabel sectionLabel = new JLabel("Push Down Method Candidates");
+                sectionLabel.setFont(sectionLabel.getFont().deriveFont(Font.BOLD, 12f));
+                sectionLabel.setForeground(JBColor.GRAY);
+                sectionLabel.setBorder(new EmptyBorder(0, 2, 6, 0));
+                resultsContainer.add(sectionLabel);
+                for (int i = 0; i < pushDownCandidates.size(); i++) {
+                    resultsContainer.add(buildPushDownCard(pushDownCandidates.get(i), i + 1));
+                    resultsContainer.add(Box.createVerticalStrut(8));
+                }
             }
         }
 
@@ -158,7 +246,14 @@ class ScanResultsPanel {
 
         card.add(info, BorderLayout.CENTER);
 
-        // Right: Refactor button — label reflects which technique will be used
+        // Right: Refactor button — label reflects which technique will
+        // likely be used. Note this label is a best-guess hint shown
+        // BEFORE the click: Type 1/2 groups show "Extract →" here, but
+        // triggerRefactor() may still silently upgrade the actual refactor
+        // applied to Pull Up Method if the pair turns out to be in sibling
+        // subclasses — see triggerRefactor() below for why the label
+        // can't know that in advance without doing the same PSI work the
+        // click itself does.
         String btnLabel = (group.cloneType == CloneType.TYPE_4) ? "Delegate →" : "Extract →";
         JButton refactorBtn = new JButton(btnLabel);
         refactorBtn.setBackground(typeColor(group.cloneType));
@@ -180,10 +275,60 @@ class ScanResultsPanel {
         return card;
     }
 
+    private static final Color PUSH_DOWN_COLOR = new Color(76, 99, 168);
+
+    private JPanel buildPushDownCard(PushDownCandidate candidate, int index) {
+        JPanel card = new JPanel(new BorderLayout(8, 0));
+        card.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(PUSH_DOWN_COLOR, 2),
+                new EmptyBorder(10, 12, 10, 12)
+        ));
+        card.setMaximumSize(new Dimension(Integer.MAX_VALUE, 120));
+        card.setBackground(JBColor.background().brighter());
+
+        JPanel info = new JPanel();
+        info.setLayout(new BoxLayout(info, BoxLayout.Y_AXIS));
+        info.setOpaque(false);
+
+        JLabel typeLabel = new JLabel("#" + index + "  Push Down Candidate");
+        typeLabel.setFont(typeLabel.getFont().deriveFont(Font.BOLD, 13f));
+        typeLabel.setForeground(PUSH_DOWN_COLOR);
+
+        JLabel methodLabel = new JLabel("Method: " + candidate.methodName + "()  on  " + candidate.superClassName);
+        methodLabel.setFont(methodLabel.getFont().deriveFont(Font.PLAIN, 12f));
+
+        JLabel detailLabel = new JLabel("Only used by: " + candidate.targetSubclassName);
+        detailLabel.setFont(detailLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        detailLabel.setForeground(JBColor.GRAY);
+
+        info.add(typeLabel);
+        info.add(Box.createVerticalStrut(4));
+        info.add(methodLabel);
+        info.add(Box.createVerticalStrut(2));
+        info.add(detailLabel);
+
+        card.add(info, BorderLayout.CENTER);
+
+        JButton pushDownBtn = new JButton("Push Down →");
+        pushDownBtn.setBackground(PUSH_DOWN_COLOR);
+        pushDownBtn.setForeground(Color.WHITE);
+        pushDownBtn.setFocusPainted(false);
+        pushDownBtn.addActionListener(e -> {
+            for (JButton btn : activeRefactorButtons) {
+                btn.setEnabled(false);
+            }
+            triggerPushDown(candidate);
+        });
+        activeRefactorButtons.add(pushDownBtn);
+        card.add(pushDownBtn, BorderLayout.EAST);
+
+        return card;
+    }
+
     // ── PHASE 1: Route refactoring by clone type ─────────────────────────────
     //
-    // Actual extraction/delegation logic lives in ExtractMethodEngine —
-    // shared with Scenario 1's gutter icon, so both entry points always run
+    // Actual extraction/delegation/pull-up logic lives in ExtractMethodEngine
+    // — shared with Scenario 1's gutter icon, so both entry points always run
     // through the exact same, extensively hand-tested implementation rather
     // than two separately-maintained copies. See ExtractMethodEngine for the
     // full list of safety measures.
@@ -192,6 +337,16 @@ class ScanResultsPanel {
     // Method has nothing to work with there — routed to delegate() instead,
     // mirroring the same Extract-vs-Delegate split already built and
     // verified on the GitHub-bot side of CloneGuard (server.py).
+    //
+    // For Type 1/2/3 groups, Pull Up Method is now tried FIRST, before
+    // falling back to Extract Method. tryPullUpIfApplicable() does its own
+    // cheap PSI check (same class? shared non-Object superclass?) and
+    // either fully handles the refactor and returns true, or does nothing
+    // at all — no dialog, no side effects — and returns false, in which
+    // case we fall through to the existing extract() call exactly as
+    // before. This means the SAME "Extract →" button now transparently
+    // becomes a Pull Up when the pair happens to sit in sibling subclasses,
+    // with no new button or new user action required.
     private void triggerRefactor(CloneGroup group) {
         if (group.methods.size() < 2) {
             JOptionPane.showMessageDialog(root,
@@ -203,13 +358,25 @@ class ScanResultsPanel {
         String canonical = group.methods.get(0);
         String duplicate = group.methods.get(1);
 
+        com.cloneguard.refactor.ExtractMethodEngine engine =
+                com.cloneguard.refactor.ExtractMethodEngine.getInstance(project);
+
         if (group.cloneType == CloneType.TYPE_4) {
-            com.cloneguard.refactor.ExtractMethodEngine.getInstance(project)
-                    .delegate(canonical, duplicate, group.cloneType.label, this::rescanCurrentFile);
+            engine.delegate(canonical, duplicate, group.cloneType.label, this::rescanCurrentFile);
         } else {
-            com.cloneguard.refactor.ExtractMethodEngine.getInstance(project)
-                    .extract(canonical, duplicate, group.cloneType.label, this::rescanCurrentFile);
+            boolean handledAsPullUp = engine.tryPullUpIfApplicable(
+                    canonical, duplicate, group.cloneType.label, this::rescanCurrentFile);
+            if (!handledAsPullUp) {
+                engine.extract(canonical, duplicate, group.cloneType.label, this::rescanCurrentFile);
+            }
         }
+    }
+
+    // ── Push Down trigger — separate from triggerRefactor() above since
+    // push-down candidates aren't CloneGroups (no pair, no clone type).
+    private void triggerPushDown(PushDownCandidate candidate) {
+        com.cloneguard.refactor.ExtractMethodEngine.getInstance(project)
+                .pushDown(candidate.methodName, candidate.targetSubclassName, this::rescanCurrentFile);
     }
 
 
@@ -219,8 +386,9 @@ class ScanResultsPanel {
         if (scanner == null) return;
 
         List<CloneGroup> freshGroups = ReadAction.compute(() -> scanner.scanFile(psiFile));
+        List<PushDownCandidate> freshPushDownCandidates = ReadAction.compute(() -> scanner.findPushDownCandidates(psiFile));
         ApplicationManager.getApplication().invokeLater(() ->
-                CloneGuardToolWindowFactory.showResults(project, freshGroups, psiFile.getName())
+                CloneGuardToolWindowFactory.showResults(project, freshGroups, freshPushDownCandidates, psiFile.getName())
         );
     }
 

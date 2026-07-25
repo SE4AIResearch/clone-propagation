@@ -85,9 +85,47 @@ public final class FileScannerService {
         Map<String, String> result = new LinkedHashMap<>();
         try {
             Collection<PsiMethod> methods = PsiTreeUtil.findChildrenOfType(psiFile, PsiMethod.class);
+
+            // FIX (found live, Pull Up Method testing): this map used to be
+            // keyed by method.getName() alone. Two DIFFERENT methods
+            // sharing the same simple name in DIFFERENT classes -- e.g.
+            // Dog.describe() and Cat.describe(), exactly the shape Pull Up
+            // Method exists to find, since sibling subclasses very commonly
+            // share a method name -- silently collided in this
+            // Map<String,String>, with the second one overwriting the
+            // first. Confirmed live: a real Type 1 clone pair across
+            // sibling subclasses never reached detection at all, because
+            // only ONE of the two copies survived this map before
+            // anything was even sent to Layer 1/2.
+            //
+            // Fix: only qualify a key with its containing class name
+            // ("ClassName.methodName") when the plain simple name would
+            // actually collide with another method somewhere else in the
+            // file. Every method whose name is unique in the file keeps
+            // the exact same unqualified key as before -- this is a no-op
+            // for the overwhelming majority of files, and fully backward
+            // compatible with every existing caller of this map (server
+            // payloads, local Layer 1 fallback, indexing). See
+            // ExtractMethodEngine.resolveMethodByName() for the matching
+            // other half of this fix -- qualified names need a
+            // class-aware lookup on the way back in, not just a
+            // collision-safe key on the way out.
+            java.util.Map<String, Integer> nameCounts = new java.util.HashMap<>();
+            for (PsiMethod method : methods) {
+                if (method.getBody() == null) continue;
+                nameCounts.merge(method.getName(), 1, Integer::sum);
+            }
+
             for (PsiMethod method : methods) {
                 PsiCodeBlock body = method.getBody();
                 if (body == null) continue;
+                String key = method.getName();
+                if (nameCounts.getOrDefault(key, 0) > 1) {
+                    PsiClass containingClass = method.getContainingClass();
+                    if (containingClass != null && containingClass.getName() != null) {
+                        key = containingClass.getName() + "." + key;
+                    }
+                }
                 // FIX (professor-flagged, confirmed live): previously sent
                 // body.getText() -- body-only text, no modifiers/return
                 // type/name -- as the function's code, with the real
@@ -103,7 +141,7 @@ public final class FileScannerService {
                 // signature + body, matching what
                 // InlineSuggestionListener.indexFunctions() already does
                 // correctly elsewhere in this codebase.
-                result.put(method.getName(), method.getText());
+                result.put(key, method.getText());
             }
             if (!result.isEmpty()) {
                 LOG.info("CloneGuard: PSI extracted " + result.size() + " methods");
@@ -165,5 +203,86 @@ public final class FileScannerService {
             else if (c == '}') { depth--; if (depth == 0) return i; }
         }
         return -1;
+    }
+
+    // ── Push Down Method candidate detection ──────────────────────────────
+    // Unlike clone detection, this isn't looking for two duplicated
+    // methods — it's looking for ONE method that's declared too high in a
+    // class hierarchy: a method sitting on a superclass that (a) has at
+    // least two direct subclasses in this file, and (b) is, per static
+    // reference search, only ever actually used from ONE of them. That
+    // combination is exactly the situation Push Down Method exists to fix.
+    //
+    // Deliberately excludes the case of a superclass with only ONE
+    // subclass in the file: with just one subclass, "only used by one
+    // subclass" isn't a meaningful signal on its own — it's just as likely
+    // that the method genuinely belongs on the superclass and the file
+    // simply doesn't happen to show a second subclass using it yet. This
+    // requires there to be at least one OTHER sibling subclass that
+    // provably does NOT use it, which is what actually indicates the
+    // method is misplaced.
+    public List<PushDownCandidate> findPushDownCandidates(PsiFile psiFile) {
+        List<PushDownCandidate> candidates = new ArrayList<>();
+        try {
+            Collection<PsiClass> allClasses = PsiTreeUtil.findChildrenOfType(psiFile, PsiClass.class);
+
+            for (PsiClass superClass : allClasses) {
+                List<PsiClass> directSubclasses = new ArrayList<>();
+                for (PsiClass maybeSub : allClasses) {
+                    PsiClass sup = maybeSub.getSuperClass();
+                    if (sup != null && sup.equals(superClass)) {
+                        directSubclasses.add(maybeSub);
+                    }
+                }
+                // Need at least two siblings — see method-level note above
+                // for why one subclass alone isn't enough signal.
+                if (directSubclasses.size() < 2) continue;
+
+                for (PsiMethod method : superClass.getMethods()) {
+                    if (method.getBody() == null) continue; // abstract/interface — nothing to push
+                    if (method.isConstructor()) continue;
+
+                    Set<PsiClass> usingSubclasses = new HashSet<>();
+                    boolean usedOutsideSubclasses = false;
+
+                    for (PsiReference ref : com.intellij.psi.search.searches.ReferencesSearch.search(method).findAll()) {
+                        PsiElement refElement = ref.getElement();
+                        // Ignore the method's own body (recursive self-calls
+                        // don't count as "external usage").
+                        if (PsiTreeUtil.isAncestor(method, refElement, false)) continue;
+
+                        PsiClass refOwningClass = PsiTreeUtil.getParentOfType(refElement, PsiClass.class);
+                        if (refOwningClass == null) {
+                            usedOutsideSubclasses = true;
+                            continue;
+                        }
+                        if (directSubclasses.contains(refOwningClass)) {
+                            usingSubclasses.add(refOwningClass);
+                        } else {
+                            // Used from the superclass itself (by another
+                            // method there), from an unrelated class, or
+                            // from a subclass further down the hierarchy —
+                            // any of these means it's not safely
+                            // push-down-able to just one direct subclass.
+                            usedOutsideSubclasses = true;
+                        }
+                    }
+
+                    if (!usedOutsideSubclasses && usingSubclasses.size() == 1) {
+                        PsiClass targetSubclass = usingSubclasses.iterator().next();
+                        candidates.add(new PushDownCandidate(
+                                method.getName(),
+                                superClass.getName(),
+                                targetSubclass.getName()
+                        ));
+                        LOG.info("CloneGuard: push-down candidate found: " + method.getName() +
+                                "() on " + superClass.getName() + " -> " + targetSubclass.getName());
+                    }
+                }
+            }
+        } catch (Exception e) {
+            LOG.warn("CloneGuard: findPushDownCandidates failed: " + e.getMessage());
+        }
+        return candidates;
     }
 }

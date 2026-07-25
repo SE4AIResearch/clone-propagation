@@ -220,7 +220,27 @@ public class LocalCloneDetector {
                 .replaceAll("/\\*[\\s\\S]*?\\*/", "");
 
         StringBuilder sb = new StringBuilder();
-        Pattern p = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*|[^A-Za-z0-9_\\s]+|\\s+");
+        // FIX (found live, Pull Up Type 2 testing): the previous pattern
+        // had no concept of a string/char literal as a single atomic
+        // unit -- "Animal: " and "Wing: " both had their INSIDE contents
+        // tokenized as if they were ordinary identifiers, so the word
+        // "Animal" inside the quotes got replaced with VAR exactly like a
+        // real variable reference would. Confirmed live: two completely
+        // unrelated methods building different string literals in the
+        // same code shape -- "Animal: " + name vs "Wing: " + wingType --
+        // normalized to the identical "VAR: VAR" shape and hashed as a
+        // false-positive Type 2 clone. String and char literals are now
+        // matched FIRST, as whole atomic tokens, so their contents are
+        // never touched by identifier substitution -- consistent with
+        // how tokenizeStatement() in ExtractMethodEngine already handles
+        // this correctly elsewhere in the codebase.
+        Pattern p = Pattern.compile(
+                "\"(?:[^\"\\\\]|\\\\.)*\""
+                + "|'(?:[^'\\\\]|\\\\.)*'"
+                + "|[A-Za-z_][A-Za-z0-9_]*"
+                + "|[^A-Za-z0-9_\\s]+"
+                + "|\\s+"
+        );
         Matcher m = p.matcher(s);
 
         while (m.find()) {
@@ -228,6 +248,15 @@ public class LocalCloneDetector {
 
             if (token.matches("\\s+")) {
                 sb.append(" ");
+                continue;
+            }
+
+            // String/char literals are compared verbatim, never
+            // substituted -- their actual content is exactly what
+            // distinguishes otherwise identically-shaped code (e.g. two
+            // different messages built with the same surrounding logic).
+            if (token.startsWith("\"") || token.startsWith("'")) {
+                sb.append(token);
                 continue;
             }
 
