@@ -228,10 +228,37 @@ def strip_to_structure(code):
         'function', 'let', 'var', 'typeof', 'async', 'await', 'undefined',
         'of', 'in', 'delete', 'void'
     }
-    # Strip comments and strings first
+    # Strip comments first
     code = re.sub(r'//[^\n]*', '', code)
     code = re.sub(r'/\*[\s\S]*?\*/', '', code)
-    code = re.sub(r'["\'].*?["\']', 'STR', code)
+
+    # FIX (found live, Pull Up Type 2 testing -- mirrors the identical
+    # bug already found and fixed in LocalCloneDetector.normalizeIdentifiers()
+    # on the Java side): this used to collapse EVERY string/char literal
+    # into the single generic token "STR", regardless of its actual
+    # content -- "Animal: " and "Wing: " both became STR, discarding
+    # exactly the information that would have told two otherwise
+    # similarly-shaped methods apart. Confirmed live: Dog.describe()
+    # (builds "Animal: " + name) and Eagle.describeWing() (builds
+    # "Wing: " + wingType) were reported as a Type 2 clone of each other
+    # by THIS function specifically -- and worse, the old "STR" literal
+    # text was then re-tokenized by the VAR-substitution pass below and
+    # replaced AGAIN, collapsing every string literal all the way down
+    # to a bare "VAR" with zero distinguishing content left at all.
+    #
+    # Fix: protect each literal's ACTUAL text behind a unique sentinel
+    # before tokenizing (same technique this function already uses for
+    # numeric literals just below, for exactly the same reason -- see
+    # that comment), then restore the real text verbatim once
+    # tokenization is done, so literal content survives all the way
+    # through to the final comparison. Two functions that differ only in
+    # what a string literal SAYS are no longer indistinguishable.
+    literals = []
+    def _stash_literal(m):
+        literals.append(m.group(0))
+        return '\x00STR' + str(len(literals) - 1) + '\x00'
+    code = re.sub(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'', _stash_literal, code)
+
     # IMPORTANT: numeric literals get a placeholder that does NOT look like an
     # identifier ('#NUM#') so the VAR substitution pass below cannot re-match
     # and overwrite it. Previously "2" -> "NUM" -> re-matched as an identifier
@@ -241,11 +268,13 @@ def strip_to_structure(code):
     # split apart by the tokenizer regex below, so numeric literals stay
     # distinguishable from identifiers all the way through to the final join.
     code = re.sub(r'\b\d+\.?\d*\b', '\x00NUM\x00', code)
-    tokens = re.findall(r'\x00NUM\x00|\b\w+\b|[^\w\s]', code)
+    tokens = re.findall(r'\x00STR\d+\x00|\x00NUM\x00|\b\w+\b|[^\w\s]', code)
     result = []
     for t in tokens:
         if t == '\x00NUM\x00':
             result.append('NUM')
+        elif t.startswith('\x00STR') and t.endswith('\x00'):
+            result.append(literals[int(t[4:-1])])
         elif re.match(r'^[a-zA-Z_]\w*$', t) and t not in keywords:
             result.append('VAR')
         else:
@@ -478,9 +507,38 @@ def get_return_type_shared(code):
     code_no_comments = re.sub(r"//[^\n]*", "", code)
     code_no_comments = re.sub(r"/\*[\s\S]*?\*/", "", code_no_comments)
 
+    # FIX (found live, Type 4 gcd testing — gcdIterative()/gcdRecursive()):
+    # this regex used to run unanchored over the ENTIRE method text. That's
+    # unsound the moment a method has no explicit modifier (public/private/
+    # etc.) -- e.g. a package-private "int gcdIterative(int a, int b) {" --
+    # because the leading (?:modifiers|\s)+ group then has nothing valid to
+    # anchor on AT the real signature, so re.search skips straight past it
+    # and instead matches the first coincidental "word word(" shape found
+    # ANYWHERE in the body. For gcdRecursive() specifically, that shape was
+    # its own recursive call, "return gcdRecursive(b, a % b);" -- captured
+    # as TYPE="return", a literal keyword misread as a return type. For
+    # gcdIterative(), nothing in the body happened to match that shape at
+    # all, so it fell through to "unknown" instead. Confirmed directly:
+    # "unknown" != "return" tripped the compatibility gate and silently
+    # rejected a genuine Type 4 clone before CodeBERT's semantic score was
+    # ever consulted.
+    #
+    # Fix: isolate just the SIGNATURE portion -- everything up to the
+    # first top-level "{" -- before running the regex at all. A Java
+    # method's signature can never itself contain a literal "{", so this
+    # guarantees the regex only ever sees the real signature, never
+    # anything from inside the body, regardless of whether a modifier
+    # keyword is present. Combined with changing the leading modifiers
+    # group from + to * (so it can validly match ZERO modifiers), a
+    # package-private signature like "int gcdIterative(" now matches
+    # correctly starting at its true first character, instead of only
+    # ever being reachable via the old, unsound whole-body search.
+    brace_idx = code_no_comments.find("{")
+    signature_only = code_no_comments[:brace_idx] if brace_idx != -1 else code_no_comments
+
     match = re.search(
-        r'(?:public|private|protected|static|final|\s)+\s*(void|int|long|double|float|boolean|String|\w+)\s+\w+\s*\(',
-        code_no_comments
+        r'(?:public|private|protected|static|final|\s)*\s*(void|int|long|double|float|boolean|String|\w+)\s+\w+\s*\(',
+        signature_only
     )
     return match.group(1) if match else "unknown"
 
@@ -747,6 +805,28 @@ def if_condition_relational_ops(code):
     return ops
 
 
+def has_other_method_call(code, own_name):
+    """True if the body calls some OTHER method -- a plain identifier
+    immediately followed by '(', that isn't a Java control-flow keyword
+    (if/for/while/switch/catch/synchronized/return) and isn't the
+    function's own name (a self-call is recursion, tracked separately by
+    is_recursive_shared() above -- calling yourself isn't "delegating to
+    something else"). Same text/regex approach as the rest of this
+    file's call-detection helpers (see _resolved_calls_own_name further
+    down)."""
+    control_keywords = {'if', 'for', 'while', 'switch', 'catch', 'synchronized', 'return'}
+    idx = code.find('{')
+    body = code[idx:] if idx != -1 else code
+    for m in re.finditer(r'\b([A-Za-z_]\w*)\s*\(', body):
+        name = m.group(1)
+        if name in control_keywords:
+            continue
+        if own_name and name == own_name:
+            continue
+        return True
+    return False
+
+
 def operations_compatible_shared(code1, code2, name1=None, name2=None):
     """
     Two functions are compatible if same return type AND the operators
@@ -840,6 +920,27 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
             print(f"[CloneGuard] Branching mismatch: one function has conditional "
                   f"logic inside its loop and the other does not ({if_ops_1} vs {if_ops_2}) — skipping")
             return False, False
+
+    # FIX (found live, Pull Up testing -- Car.drive()/Boat.sail() false
+    # positive): confirmed live that one function calling ANOTHER method
+    # internally (honkHorn()) while the other calls nothing at all (a
+    # plain field assignment) was enough to still pass every check above
+    # -- both share the '=' operator, and neither branches, so the
+    # branching-presence check above doesn't catch this specific
+    # difference. But delegating to another method is itself a real
+    # behavioral difference, the same category of signal as
+    # "has branching" above: a function that calls out to more logic is
+    # doing meaningfully more than one that doesn't, regardless of
+    # shared operators elsewhere. Presence of an internal method call,
+    # like presence of branching, is checked independently of WHICH
+    # method gets called -- only whether one function delegates to
+    # something and the other doesn't.
+    has_call_1 = has_other_method_call(code1, fn1_name)
+    has_call_2 = has_other_method_call(code2, fn2_name)
+    if has_call_1 != has_call_2:
+        print(f"[CloneGuard] Method-call presence mismatch: one function calls "
+              f"another method internally and the other does not — skipping")
+        return False, False
 
     # (b) Loop nesting depth mismatch, but ONLY when both functions are
     # non-recursive (iterative). A nested-loop matrix-sum and a flat
@@ -2487,7 +2588,24 @@ def test_page():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("CLONEGUARD_PORT", "8765"))
-    print(f"[CloneGuard] Server running at http://127.0.0.1:{port}")
-    print("[CloneGuard] Test page: http://127.0.0.1:{}/test".format(port))
-    app.run(host="127.0.0.1", port=port, debug=False, threaded=False, use_reloader=False)
+    # FIX (Render deployment): two changes needed for this to work as a
+    # cloud-hosted service, neither of which affects local development.
+    #
+    # 1. host="127.0.0.1" only accepts connections from the SAME machine
+    #    -- completely unreachable from the internet. Render (and every
+    #    other cloud host) needs 0.0.0.0, which accepts connections on
+    #    any network interface, not just loopback.
+    #
+    # 2. Render assigns its own port dynamically and injects it via the
+    #    PORT environment variable -- it does NOT respect a custom
+    #    variable name. Checking PORT first (falling back to the
+    #    existing CLONEGUARD_PORT, then 8765) means this same file keeps
+    #    working exactly as before for local development -- nothing
+    #    about the existing `KMP_DUPLICATE_LIB_OK=TRUE python3 server.py`
+    #    workflow changes -- while also correctly picking up whatever
+    #    port Render assigns when deployed there.
+    port = int(os.environ.get("PORT", os.environ.get("CLONEGUARD_PORT", "8765")))
+    host = "0.0.0.0"
+    print(f"[CloneGuard] Server running on {host}:{port}")
+    print(f"[CloneGuard] Test page: http://{host}:{port}/test")
+    app.run(host=host, port=port, debug=False, threaded=False, use_reloader=False)
