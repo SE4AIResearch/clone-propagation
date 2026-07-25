@@ -29,7 +29,17 @@ import org.jetbrains.annotations.Nullable;
 @Service(Service.Level.APP)
 public final class CloneGuardSettings implements PersistentStateComponent<CloneGuardSettings.State> {
 
-    public static final String DEFAULT_SERVER_URL = "http://localhost:8765";
+    // UPDATED: was "http://localhost:8765", requiring every user to run
+    // the Python server locally themselves before the plugin could do
+    // any Layer 2 (CodeBERT/semantic) detection at all. Now points at a
+    // persistently hosted instance on Render (Standard tier, 2GB RAM —
+    // needed for CodeBERT + UniXcoder to load reliably), confirmed live
+    // and reachable via a real GET /health check returning
+    // {"status":"ok","models":["codebert","unixcoder"]} before this was
+    // changed. Anyone installing the plugin zip now gets working Layer 2
+    // detection immediately, with zero local setup required — the
+    // original goal behind this whole change.
+    public static final String DEFAULT_SERVER_URL = "https://cloneguard-server.onrender.com";
 
     /** Plain data holder — PersistentStateComponent serializes public fields directly. */
     public static class State {
