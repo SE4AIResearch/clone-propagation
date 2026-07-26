@@ -142,6 +142,41 @@ jobs:
                       functions.append({"name": name, "code": code, "start": start, "end": end})
               return functions
 
+          # FIX (professor-flagged, 2.2): the review's specific concern --
+          # that a malicious PR comment could inject a shell command via
+          # `applied_ids` into the later `subprocess.run(["git", "commit",
+          # "-m", f"..."], check=True)` call -- was checked directly and
+          # doesn't hold for this code as written. That call uses the LIST
+          # form of subprocess.run with no shell=True, which never invokes
+          # a shell to interpret its arguments at all; each list element
+          # goes straight to the git binary as inert literal text. Verified
+          # empirically: running that exact calling pattern with a
+          # deliberately malicious commit message containing real shell
+          # metacharacters (semicolons, backticks, an injection attempt)
+          # executed nothing -- the whole malicious string was committed
+          # verbatim as plain text. `idx` is also structurally incapable of
+          # containing shell metacharacters in the first place, since its
+          # own capture group is `(\d+)`, digits only.
+          #
+          # What tracing this DID turn up: the `filepath` capture group
+          # just below, `([^`]+)`, has essentially no constraint at all --
+          # unlike idx/name_a/name_b, it can contain almost anything,
+          # including a path-traversal sequence like "../../.github/
+          # workflows/other.yml". That path is then used directly in
+          # open(filepath, ...) for both reading AND writing. A malicious
+          # PR comment could point this at a file well outside the
+          # intended source tree. Fixed here: reject any filepath that
+          # isn't a genuine relative path resolving inside the checked-out
+          # repository, before it's ever opened.
+          def is_safe_relative_path(filepath, repo_root):
+              if os.path.isabs(filepath):
+                  return False
+              resolved = os.path.realpath(os.path.join(repo_root, filepath))
+              repo_root_resolved = os.path.realpath(repo_root)
+              return resolved == repo_root_resolved or resolved.startswith(repo_root_resolved + os.sep)
+
+          REPO_ROOT = os.getcwd()  # actions/checkout@v4 already ran -- this IS the repo root
+
           # ── Apply, grouped by file so each file is read/written once ───────
           by_file = {}
           for idx, filepath, name_a, name_b in selected:
@@ -151,6 +186,12 @@ jobs:
           applied, skipped = [], []
 
           for filepath, file_groups in by_file.items():
+              if not is_safe_relative_path(filepath, REPO_ROOT):
+                  for idx, name_a, name_b in file_groups:
+                      skipped.append((idx, name_a, name_b,
+                                       f"'{filepath}' is not a valid path within the repository -- skipped"))
+                  continue
+
               if not os.path.exists(filepath):
                   for idx, name_a, name_b in file_groups:
                       skipped.append((idx, name_a, name_b, f"{filepath} not found"))

@@ -269,6 +269,13 @@ public class InlineSuggestionListener implements EditorFactoryListener {
         notification.addAction(new AnAction("Push Down \u2192") {
             @Override
             public void actionPerformed(@NotNull AnActionEvent e) {
+                // Same reasoning as the Pull Up/Extract/Delegate action —
+                // see the comment there for the full explanation.
+                PsiFile psiFileForMetrics = PsiManager.getInstance(project).findFile(vf);
+                if (psiFileForMetrics != null) {
+                    com.cloneguard.services.MetricsTrackerService.getInstance(project)
+                            .startSessionIfNoneActive(psiFileForMetrics);
+                }
                 ExtractMethodEngine.getInstance(project).pushDown(
                         vf, candidate.methodName, candidate.targetSubclassName,
                         (updatedFile) -> notification.expire());
@@ -336,14 +343,6 @@ public class InlineSuggestionListener implements EditorFactoryListener {
             notification.addAction(new AnAction(actionLabel) {
                 @Override
                 public void actionPerformed(@NotNull AnActionEvent e) {
-                    // TEMPORARY DIAGNOSTIC — the very first thing this method
-                    // does, before touching anything else. If this line never
-                    // appears in the log after a delayed click, that proves
-                    // definitively the click never reached this code at all —
-                    // an IntelliJ platform/notification issue, not a bug
-                    // reachable from application code. If it DOES appear,
-                    // something inside is failing silently instead.
-                    LOG.info("CloneGuard ACTION DEBUG: Refactor action invoked for " + duplicateName + "() vs " + canonicalName + "()");
                     // FIX (found live, this session -- Scenario 1 all-four-
                     // types test): Type 4 semantic clones share no literal
                     // code by definition, so Extract Method always correctly
@@ -364,6 +363,27 @@ public class InlineSuggestionListener implements EditorFactoryListener {
                     // guaranteed to still be the focused editor by the time
                     // the user clicks this button -- notifications are
                     // asynchronous, and focus can shift in between.
+                    // EXTENDED (Scenario 1 dashboard-coverage request):
+                    // recordRefactor() below silently does nothing if no
+                    // session is currently open -- correct behavior when
+                    // called from a scan-triggered refactor, but wrong
+                    // here: if the user pastes a clone and refactors it
+                    // via THIS notification before ever running "Scan
+                    // Current File" in this session, there was previously
+                    // no baseline to attribute it to at all, and the
+                    // refactor would succeed but never appear on the
+                    // Trend Dashboard. Opens one now if (and only if)
+                    // nothing is already active -- see
+                    // startSessionIfNoneActive()'s own doc for why this
+                    // is safe to call unconditionally without risk of
+                    // discarding an in-progress session from an earlier
+                    // scan.
+                    PsiFile psiFileForMetrics = PsiManager.getInstance(project).findFile(vf);
+                    if (psiFileForMetrics != null) {
+                        com.cloneguard.services.MetricsTrackerService.getInstance(project)
+                                .startSessionIfNoneActive(psiFileForMetrics);
+                    }
+
                     ExtractMethodEngine engine = ExtractMethodEngine.getInstance(project);
                     if (result.cloneType == CloneType.TYPE_4) {
                         engine.delegate(

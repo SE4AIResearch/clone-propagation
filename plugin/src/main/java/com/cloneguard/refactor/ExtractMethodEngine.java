@@ -59,12 +59,25 @@ public class ExtractMethodEngine {
     // Tracks helper method names created by Extract Method. Prevents two
     // separate refactors (from either scenario) generating two helpers with
     // the same name.
-    private final Set<String> generatedHelperNames = new HashSet<>();
+    //
+    // FIX (professor-flagged, 3.1 -- High): this engine is a project-level
+    // singleton, and refactorings can genuinely fire concurrently -- a
+    // background Scenario 1 paste-check completing on one thread while the
+    // user clicks Extract in Scenario 2's tool window on another. A plain
+    // HashSet has no thread-safety guarantee at all under concurrent
+    // add()/contains() calls; worst case, two refactors racing each other
+    // could both decide the same helper name is available, generating a
+    // real naming collision in the actual source file, or the set's
+    // internal structure could be corrupted entirely. ConcurrentHashMap's
+    // key-set view gives the exact same Set<String> API this code already
+    // uses everywhere, with genuine thread-safety underneath -- no call
+    // site below needed to change at all.
+    private final Set<String> generatedHelperNames = ConcurrentHashMap.newKeySet();
 
     // Tracks result-holder class names generated for mixed-type multi-value
-    // extraction (e.g. XxxResult), same collision-prevention purpose as
-    // generatedHelperNames above.
-    private final Set<String> generatedResultClassNames = new HashSet<>();
+    // extraction (e.g. XxxResult), same collision-prevention purpose --
+    // and same concurrency risk -- as generatedHelperNames above.
+    private final Set<String> generatedResultClassNames = ConcurrentHashMap.newKeySet();
 
     // Tracks which canonical/duplicate PAIRS have RECENTLY been extracted,
     // with a timestamp — guards against extract() somehow firing twice for

@@ -1,8 +1,46 @@
 from flask import Flask, request, jsonify, send_file
-from flask_cors import CORS
 import os
 import re
 import threading
+import logging
+
+# FIX (professor-flagged, 2.6 -- Low): server.py used to log everything
+# through plain print() statements -- 51 of them, mixing rare startup
+# events with high-frequency per-request tracing (every pairwise
+# comparison decision, every safety-check skip, every FAISS index
+# update) into one undifferentiated stream with no way to turn any of
+# it down. In production that means high log volume driving up hosting
+# costs and making the handful of messages that actually matter hard to
+# find in the noise.
+#
+# Replaced with the standard logging module: genuine lifecycle events
+# (model loading, server startup, index resets, per-request summaries)
+# log at INFO; everything else -- the detailed tracing through each
+# individual safety check, similarity score, and pairwise comparison --
+# logs at DEBUG, so it's available when actively debugging (set
+# CLONEGUARD_LOG_LEVEL=DEBUG) but silent by default in production.
+logging.basicConfig(
+    level=os.environ.get("CLONEGUARD_LOG_LEVEL", "INFO"),
+    format="[CloneGuard] %(message)s",
+)
+logger = logging.getLogger("cloneguard")
+
+# FIX (found live, testing the 2.6 change): logging.basicConfig() above
+# configures the ROOT logger -- which every third-party library's own
+# logger propagates through by default, unless that library sets up an
+# isolated handler of its own. Confirmed directly from a real server
+# startup log: huggingface_hub's internal HTTP request tracing ("HTTP
+# Request: HEAD https://huggingface.co/...") was showing up tagged with
+# our own "[CloneGuard]" prefix, making routine third-party network
+# chatter look like it was coming from this application's own code --
+# the opposite of what 2.6 was trying to achieve, since it's genuinely
+# MORE log volume dressed up as if it were ours. Explicitly raising
+# these specific known-noisy libraries to WARNING (their routine INFO-
+# level chatter is rarely useful, but a real WARNING from them still
+# surfaces) leaves CloneGuard's own "cloneguard" logger as the only one
+# actually affected by CLONEGUARD_LOG_LEVEL.
+for _noisy_logger in ("huggingface_hub", "urllib3", "filelock", "transformers"):
+    logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
 
 # Reduce native crashes on macOS when PyTorch/FAISS run together
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -15,22 +53,90 @@ import faiss
 import numpy as np
 
 app = Flask(__name__)
-CORS(app)
 
-print("[CloneGuard] Loading CodeBERT model...")
+# FIX (professor-flagged, 2.1 -- Critical): this server is deployed to
+# the public internet (Render). CORS(app) used to be enabled
+# unconditionally, wide open to every origin -- but CORS only matters
+# for BROWSER-based cross-origin requests, and neither real caller here
+# is a browser: the IDE plugin uses Java's HttpClient directly, and the
+# GitHub Actions workflows call this server from a CI runner, not a
+# page loaded in someone's browser. Enabling CORS was granting arbitrary
+# websites permission to call this server from a visitor's browser for
+# no actual benefit to any legitimate caller -- removed entirely (no
+# `from flask_cors import CORS`, no CORS(app) call) rather than
+# "restricted to trusted origins", since there are no legitimate
+# browser-based origins that need it at all.
+#
+# In its place: bearer-token authentication. The expected key is read
+# from the CLONEGUARD_API_KEY environment variable (set on Render, and
+# as a GitHub Actions secret for the workflows that call this server) --
+# never hardcoded in source. If CLONEGUARD_API_KEY is unset entirely
+# (e.g. a fresh local `python3 server.py` run with no environment
+# configured), authentication is skipped with a loud startup warning, so
+# local development still works out of the box without requiring every
+# contributor to generate and configure a key just to run the server on
+# their own machine -- but a PUBLIC deployment with no key set is
+# exactly the "wide-open" situation this fix exists to prevent, hence
+# the warning rather than silent acceptance either way.
+API_KEY = os.environ.get("CLONEGUARD_API_KEY")
+if not API_KEY:
+    logger.info("WARNING: CLONEGUARD_API_KEY is not set. Every "
+          "endpoint is currently UNAUTHENTICATED. Fine for local "
+          "development -- but a publicly deployed server with no key "
+          "set accepts requests from anyone on the internet.")
+
+# /health and /test are intentionally left unauthenticated: /health is
+# used by Render's own platform-level health checks, which have no way
+# to send a custom Authorization header; /test just serves a static
+# HTML test page with no data exposure or real compute cost.
+_UNAUTHENTICATED_ENDPOINTS = {"/health", "/test"}
+
+
+# FIX (professor-flagged, 2.3 -- High): endpoints accepting raw source
+# code (/check, /scan, /detect-ai, /index) had a MINIMUM length check
+# but no MAXIMUM at all. A 10MB payload would still reach tokenization
+# and chunk_into_functions() before anything meaningfully truncated it
+# -- max_length=512 only truncates the TENSOR fed to the model, not the
+# string processing that happens before that point. Rejected here, in
+# the same before_request hook as the auth check above, so every
+# endpoint is protected uniformly at the API boundary rather than
+# needing this check duplicated at each individual route.
+MAX_PAYLOAD_BYTES = 100_000  # 100KB, per the recommendation
+
+
+@app.before_request
+def limit_payload_size():
+    if request.content_length is not None and request.content_length > MAX_PAYLOAD_BYTES:
+        return jsonify({
+            "error": f"Payload too large ({request.content_length} bytes). "
+                     f"Maximum accepted size is {MAX_PAYLOAD_BYTES} bytes."
+        }), 413
+
+
+@app.before_request
+def require_api_key():
+    if not API_KEY:
+        return  # no key configured -- see startup warning above
+    if request.path in _UNAUTHENTICATED_ENDPOINTS:
+        return
+    expected = f"Bearer {API_KEY}"
+    if request.headers.get("Authorization", "") != expected:
+        return jsonify({"error": "Unauthorized"}), 401
+
+logger.info("Loading CodeBERT model...")
 tokenizer = AutoTokenizer.from_pretrained("microsoft/codebert-base")
 model = AutoModel.from_pretrained("microsoft/codebert-base")
 model.eval()
 torch.set_num_threads(1)
-print("[CloneGuard] CodeBERT ready.")
+logger.info("CodeBERT ready.")
 
 # ── UniXcoder for AI-generated code detection ──────────────────────────────
-print("[CloneGuard] Loading UniXcoder model for AI detection...")
+logger.info("Loading UniXcoder model for AI detection...")
 from transformers import RobertaTokenizer, RobertaModel
 ai_tokenizer = RobertaTokenizer.from_pretrained("microsoft/unixcoder-base")
 ai_model = RobertaModel.from_pretrained("microsoft/unixcoder-base")
 ai_model.eval()
-print("[CloneGuard] UniXcoder ready.")
+logger.info("UniXcoder ready.")
 
 class IndexStore:
     """
@@ -308,7 +414,31 @@ def structural_similarity(code1, code2):
     def normalize(code):
         code = re.sub(r'//[^\n]*', '', code)
         code = re.sub(r'/\*[\s\S]*?\*/', '', code)
-        code = re.sub(r'["\'].*?["\']', 'STR', code)
+        # FIX (professor-flagged, 2.5): this used to match string
+        # literals with r'["\'].*?["\']' -- a naive, non-greedy pattern
+        # that has no concept of an escaped quote inside the literal
+        # (e.g. "say \"hi\"" desyncs the boundary mid-string), and can
+        # match ACROSS two separate literals entirely if content between
+        # them looks quote-like. Either failure leaks raw literal text
+        # into the identifier-tokenization step below -- and because
+        # this function does an INDEX-BY-INDEX positional comparison
+        # (tokens1[i] == tokens2[i]), a single misaligned token corrupts
+        # every comparison after it, not just the one token, silently
+        # wrecking the whole positional score.
+        #
+        # Fix: reuse strip_to_structure()'s already-proven-correct
+        # boundary pattern -- "(?:[^"\\]|\\.)*" -- which explicitly
+        # handles an escaped quote (\\.) as part of the literal rather
+        # than treating it as the closing quote. This function still
+        # collapses every literal down to the single "STR" placeholder
+        # afterward, same as it always has: unlike strip_to_structure
+        # (which needs to preserve actual literal CONTENT, since that's
+        # exactly what distinguishes two Type 1/2 clones from each
+        # other), this function only cares about structural SHAPE, so
+        # collapsing to a generic placeholder is still the right choice
+        # here -- only the boundary-detection needed to be more robust,
+        # not the collapsing behavior itself.
+        code = re.sub(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'', 'STR', code)
         code = re.sub(r'\b\d+\b', 'NUM', code)
         words = re.findall(r'\b[a-zA-Z_]\w*\b', code)
         return [w if w in keywords else 'VAR' for w in words]
@@ -321,7 +451,7 @@ def structural_similarity(code1, code2):
     max_len = max(len(tokens1), len(tokens2))
     matches = sum(1 for i in range(min_len) if tokens1[i] == tokens2[i])
     score = matches / max_len if max_len > 0 else 0.0
-    print(f"[CloneGuard] Structural similarity: {score:.4f}")
+    logger.debug(f"Structural similarity: {score:.4f}")
     return score
 
 
@@ -841,7 +971,7 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
     ret1 = get_return_type_shared(code1)
     ret2 = get_return_type_shared(code2)
     if ret1 != ret2:
-        print(f"[CloneGuard] Return type mismatch: {ret1} vs {ret2} — skipping")
+        logger.debug(f"Return type mismatch: {ret1} vs {ret2} — skipping")
         return False, False
 
     # (a) Opposite comparison direction inside decision logic (not loop
@@ -856,7 +986,7 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
     opposite_pairs = [({'<'}, {'>'}), ({'<='}, {'>='})]
     for side_a, side_b in opposite_pairs:
         if (if_ops_1 == side_a and if_ops_2 == side_b) or (if_ops_1 == side_b and if_ops_2 == side_a):
-            print(f"[CloneGuard] Opposite if-condition comparison direction: "
+            logger.debug(f"Opposite if-condition comparison direction: "
                   f"{if_ops_1} vs {if_ops_2} (e.g. min-vs-max pattern) — skipping")
             return False, False
 
@@ -917,7 +1047,7 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
         has_branching_1 = len(if_ops_1) > 0
         has_branching_2 = len(if_ops_2) > 0
         if has_branching_1 != has_branching_2:
-            print(f"[CloneGuard] Branching mismatch: one function has conditional "
+            logger.debug(f"Branching mismatch: one function has conditional "
                   f"logic inside its loop and the other does not ({if_ops_1} vs {if_ops_2}) — skipping")
             return False, False
 
@@ -938,7 +1068,7 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
     has_call_1 = has_other_method_call(code1, fn1_name)
     has_call_2 = has_other_method_call(code2, fn2_name)
     if has_call_1 != has_call_2:
-        print(f"[CloneGuard] Method-call presence mismatch: one function calls "
+        logger.debug(f"Method-call presence mismatch: one function calls "
               f"another method internally and the other does not — skipping")
         return False, False
 
@@ -956,7 +1086,7 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
         depth1 = loop_nesting_depth(code1)
         depth2 = loop_nesting_depth(code2)
         if depth1 != depth2:
-            print(f"[CloneGuard] Loop nesting depth mismatch: {depth1} vs {depth2} — skipping")
+            logger.debug(f"Loop nesting depth mismatch: {depth1} vs {depth2} — skipping")
             return False, False
 
         # (c) Fixed-literal loop bound vs data-dependent loop bound.
@@ -972,7 +1102,7 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
             dd1, fixed1 = has_data_dependent_loop_bound(code1)
             dd2, fixed2 = has_data_dependent_loop_bound(code2)
             if (dd1 and fixed2 and not dd2) or (dd2 and fixed1 and not dd1):
-                print(f"[CloneGuard] Loop bound mismatch: data-dependent vs fixed-literal — skipping")
+                logger.debug(f"Loop bound mismatch: data-dependent vs fixed-literal — skipping")
                 return False, False
 
     fp1 = operator_fingerprint_shared(code1)
@@ -981,7 +1111,7 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
     # String operators vs none is a hard signal — string manipulation
     # functions should never match pure-arithmetic functions.
     if ('string' in fp1) != ('string' in fp2):
-        print(f"[CloneGuard] String operator mismatch: {fp1} vs {fp2} — skipping")
+        logger.debug(f"String operator mismatch: {fp1} vs {fp2} — skipping")
         return False, False
 
     # Arithmetic operator family must overlap meaningfully — a sum (+/+=)
@@ -991,14 +1121,14 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
     arith1 = fp1 & arithmetic_ops
     arith2 = fp2 & arithmetic_ops
     if arith1 and arith2 and arith1.isdisjoint(arith2):
-        print(f"[CloneGuard] Arithmetic operator mismatch: {fp1} vs {fp2} — skipping")
+        logger.debug(f"Arithmetic operator mismatch: {fp1} vs {fp2} — skipping")
         return False, False
     if bool(arith1) != bool(arith2):
         # Allow exception: bitwise-only functions vs arithmetic with mod
         # (e.g. n % 2 == 0  vs  n & 1 == 0) — both check evenness via a
         # single comparison, so let identifier/structural score decide.
         if not (('bitwise' in fp1 or 'bitwise' in fp2) and ('%' in fp1 or '%' in fp2)):
-            print(f"[CloneGuard] Arithmetic presence mismatch: {fp1} vs {fp2} — skipping")
+            logger.debug(f"Arithmetic presence mismatch: {fp1} vs {fp2} — skipping")
             return False, False
 
     # Identifier vocabulary overlap — catches totally unrelated functions
@@ -1150,7 +1280,7 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
     # surfacing -- flagging this as a known area of residual risk rather
     # than claiming it's fully closed.
     if overlap < 0.24 and not sufficient_overlap:
-        print(f"[CloneGuard] No identifier or meaningful operator overlap: {fp1} vs {fp2}, "
+        logger.debug(f"No identifier or meaningful operator overlap: {fp1} vs {fp2}, "
               f"shared_ops={shared_ops} (ubiquitous-only), overlap={overlap:.3f} — skipping")
         return False, False
 
@@ -1173,7 +1303,7 @@ def build_index():
     # Handle reset-only call (empty file saved)
     if reset:
         index_store.reset()
-        print("[CloneGuard] Index reset — file cleared.")
+        logger.info("Index reset — file cleared.")
         return jsonify({"ok": True, "indexed": 0, "message": "Index cleared"})
 
     if not code or len(code.strip()) < 20:
@@ -1189,26 +1319,26 @@ def build_index():
         embedding = get_embedding(code)
         added = index_store.add_if_not_duplicate(code, embedding, fn_name)
         if added:
-            print(f"[CloneGuard] Indexed: {fn_name}")
+            logger.debug(f"Indexed: {fn_name}")
         else:
-            print(f"[CloneGuard] Skipping duplicate: {fn_name}")
-        print(f"[CloneGuard] FAISS index total: {index_store.ntotal} vectors")
+            logger.debug(f"Skipping duplicate: {fn_name}")
+        logger.debug(f"FAISS index total: {index_store.ntotal} vectors")
         return jsonify({"ok": True, "indexed": index_store.ntotal})
 
     # Full method or file — chunk normally
     chunks = chunk_into_functions(code)
-    print(f"[CloneGuard] chunk count={len(chunks)}, name_hint='{fn_name_hint}', code_start='{code[:50]}'")
+    logger.debug(f"chunk count={len(chunks)}, name_hint='{fn_name_hint}', code_start='{code[:50]}'")
 
     for i, chunk in enumerate(chunks):
         fn_name = fn_name_hint if fn_name_hint and i == 0 else extract_function_name(chunk, index_store.name_hint_index())
         embedding = get_embedding(chunk)
         added = index_store.add_if_not_duplicate(chunk, embedding, fn_name)
         if added:
-            print(f"[CloneGuard] Indexed: {fn_name}")
+            logger.debug(f"Indexed: {fn_name}")
         else:
-            print(f"[CloneGuard] Skipping duplicate: {fn_name}")
+            logger.debug(f"Skipping duplicate: {fn_name}")
 
-    print(f"[CloneGuard] FAISS index total: {index_store.ntotal} vectors")
+    logger.debug(f"FAISS index total: {index_store.ntotal} vectors")
     return jsonify({"ok": True, "indexed": index_store.ntotal})
 
 
@@ -1300,13 +1430,13 @@ def check_clone():
             # Only skip self-match if body is different — same name + same body = Type 1 clone
             pasted_name = extract_function_name(suggestion, -1)
             if matched_name == pasted_name and chunk_body != matched_body:
-                print(f"[CloneGuard] Skipping self-match (different body): {matched_name}")
+                logger.debug(f"Skipping self-match (different body): {matched_name}")
                 continue
 
-            print(f"[CloneGuard] Candidate {matched_name}: semantic={semantic_score:.4f}")
-            print(f"[CloneGuard] chunk_body: '{chunk_body[:80]}'")
-            print(f"[CloneGuard] matched_body: '{matched_body[:80]}'")
-            print(f"[CloneGuard] equal: {chunk_body == matched_body}")
+            logger.debug(f"Candidate {matched_name}: semantic={semantic_score:.4f}")
+            logger.debug(f"chunk_body: '{chunk_body[:80]}'")
+            logger.debug(f"matched_body: '{matched_body[:80]}'")
+            logger.debug(f"equal: {chunk_body == matched_body}")
 
             # Type 1: exact body match = always a clone
             # Whether same name or different name — if body is identical it's a duplicate
@@ -1315,7 +1445,7 @@ def check_clone():
             # earlier value is still in scope and nothing between the two call
             # sites changes 'suggestion' or invalidates the result)
             if chunk_body == matched_body:
-                print(f"[CloneGuard] Type 1 detected: {matched_name}")
+                logger.debug(f"Type 1 detected: {matched_name}")
                 return jsonify({
                     "isClone": True,
                     "cloneType": "Type 1 — Exact Clone",
@@ -1332,8 +1462,8 @@ def check_clone():
             # Only Type 2 if structure is identical AND statement count matches.
             # If candidate has MORE statements than original → Type 3 (near-miss).
             matched_stripped = strip_to_structure(extract_body(matched["snippet"]))
-            print(f"[CloneGuard] chunk_stripped: {chunk_stripped[:80]}")
-            print(f"[CloneGuard] matched_stripped: {matched_stripped[:80]}")
+            logger.debug(f"chunk_stripped: {chunk_stripped[:80]}")
+            logger.debug(f"matched_stripped: {matched_stripped[:80]}")
             candidate_stmts = count_statements(extract_body(chunk))
             matched_stmts   = count_statements(extract_body(matched["snippet"]))
             same_structure  = (chunk_stripped == matched_stripped)
@@ -1352,7 +1482,7 @@ def check_clone():
                     extracted = extract_function_name(matched["snippet"], idx)
                     if not extracted.startswith("function_"):
                         real_name = extracted
-                print(f"[CloneGuard] Type 2 detected: {real_name}")
+                logger.debug(f"Type 2 detected: {real_name}")
                 return jsonify({
                     "isClone": True,
                     "cloneType": "Type 2 — Renamed Clone",
@@ -1408,7 +1538,7 @@ def check_clone():
             pos_score = structural_similarity(extract_body(chunk), extract_body(matched["snippet"]))
             bag_score = bag_similarity(extract_body(chunk), extract_body(matched["snippet"]))
             struct_score = max(pos_score, bag_score)
-            print(f"[CloneGuard] Structural: {struct_score:.4f} (positional={pos_score:.4f}, bag={bag_score:.4f})")
+            logger.debug(f"Structural: {struct_score:.4f} (positional={pos_score:.4f}, bag={bag_score:.4f})")
 
             # FIX (found live, this session, via actual server console log):
             # lastElement() -> lastElementSafe() (guard clause added to a
@@ -1425,7 +1555,7 @@ def check_clone():
             min_stmt_count = min(chunk_stmt_count, matched_stmt_count)
             struct_floor = 0.07 if min_stmt_count <= 3 else 0.15
             if struct_score < struct_floor:
-                print(f"[CloneGuard] Skipping — structural too low: {struct_score:.4f} (floor={struct_floor})")
+                logger.debug(f"Skipping — structural too low: {struct_score:.4f} (floor={struct_floor})")
                 continue
 
             if best_match is None or semantic_score > best_match["semantic_score"]:
@@ -1524,7 +1654,7 @@ def compute_perplexity(code_snippet):
     # Normalize: typical range 0.5-3.0
     # Low variance (< 1.0) → AI, High variance (> 2.0) → Human
     normalized = max(0.0, min(1.0, 1.0 - (token_variance - 0.3) / 1.8))
-    print(f"[CloneGuard] Token variance: {token_variance:.4f} → perplexity_score: {normalized:.4f}")
+    logger.debug(f"Token variance: {token_variance:.4f} → perplexity_score: {normalized:.4f}")
     return normalized
 
 
@@ -1568,7 +1698,7 @@ def detect_ai():
         else:
             embedding_score = perplexity_score  # fallback
 
-        print(f"[CloneGuard] perplexity_score={perplexity_score:.4f}, embedding_score={embedding_score:.4f}")
+        logger.debug(f"perplexity_score={perplexity_score:.4f}, embedding_score={embedding_score:.4f}")
 
         # Combined confidence (weighted)
         confidence = round(perplexity_score * 0.40 + embedding_score * 0.60, 4)
@@ -1584,7 +1714,7 @@ def detect_ai():
             label = "Likely Human Written"
             is_ai = False
 
-        print(f"[CloneGuard] AI Detection: confidence={confidence:.4f} → {label}")
+        logger.debug(f"AI Detection: confidence={confidence:.4f} → {label}")
 
         return jsonify({
             "isAiGenerated": is_ai,
@@ -1596,7 +1726,7 @@ def detect_ai():
         })
 
     except Exception as e:
-        print(f"[CloneGuard] AI detection error: {e}")
+        logger.debug(f"AI detection error: {e}")
         return jsonify({
             "isAiGenerated": False,
             "confidence": 0.0,
@@ -2205,7 +2335,7 @@ def scan_file():
             "message": "Need at least 2 functions to scan"
         })
 
-    print(f"[CloneGuard] /scan received {len(functions)} functions from {filename}")
+    logger.info(f"/scan received {len(functions)} functions from {filename}")
 
     # ── Build scan index ──────────────────────────────────────────────────────
     scan_index = faiss.IndexFlatIP(EMBEDDING_DIM)
@@ -2224,7 +2354,7 @@ def scan_file():
             "embedding": embedding
         })
 
-    print(f"[CloneGuard] /scan indexed {len(scan_functions)} functions")
+    logger.info(f"/scan indexed {len(scan_functions)} functions")
 
     def extract_body_local(code):
         code = code.strip()
@@ -2318,7 +2448,7 @@ def scan_file():
                 # re-flagged against anything else, not just against other
                 # wrappers.
                 if is_refactor_wrapper(fn_i["snippet"]) or is_refactor_wrapper(fn_j["snippet"]):
-                    print(f"[CloneGuard] /scan skipping refactor wrappers: {fn_i['name']} <-> {fn_j['name']}")
+                    logger.debug(f"/scan skipping refactor wrappers: {fn_i['name']} <-> {fn_j['name']}")
                     seen_pairs.add(pair_key)
                     continue
                 clone_groups.append({
@@ -2334,7 +2464,7 @@ def scan_file():
                 clone_groups[-1]["suggestion"] = generate_extract_suggestion(
                     fn_i["name"], fn_i["snippet"], fn_j["name"], fn_j["snippet"])
                 seen_pairs.add(pair_key)
-                print(f"[CloneGuard] /scan Type 1: {fn_i['name']} <-> {fn_j['name']}")
+                logger.debug(f"/scan Type 1: {fn_i['name']} <-> {fn_j['name']}")
                 continue
 
             # Type 2 vs Type 3: normalized structure match
@@ -2344,7 +2474,7 @@ def scan_file():
                 # Method) and are not clones of each other, even if their
                 # remaining bodies happen to look structurally similar.
                 if is_refactor_wrapper(fn_i["snippet"]) or is_refactor_wrapper(fn_j["snippet"]):
-                    print(f"[CloneGuard] /scan skipping refactor wrappers: {fn_i['name']} <-> {fn_j['name']}")
+                    logger.debug(f"/scan skipping refactor wrappers: {fn_i['name']} <-> {fn_j['name']}")
                     seen_pairs.add(pair_key)
                     continue
                 stmts_i = count_statements(extract_body_local(fn_i["snippet"]))
@@ -2364,7 +2494,7 @@ def scan_file():
                     clone_groups[-1]["suggestion"] = generate_extract_suggestion(
                         fn_i["name"], fn_i["snippet"], fn_j["name"], fn_j["snippet"])
                     seen_pairs.add(pair_key)
-                    print(f"[CloneGuard] /scan Type 2: {fn_i['name']} <-> {fn_j['name']}")
+                    logger.debug(f"/scan Type 2: {fn_i['name']} <-> {fn_j['name']}")
                 else:
                     # Same structure but different statement count → Type 3
                     clone_groups.append({
@@ -2380,7 +2510,7 @@ def scan_file():
                     clone_groups[-1]["suggestion"] = generate_extract_suggestion(
                         fn_i["name"], fn_i["snippet"], fn_j["name"], fn_j["snippet"])
                     seen_pairs.add(pair_key)
-                    print(f"[CloneGuard] /scan Type 3: {fn_i['name']} <-> {fn_j['name']}")
+                    logger.debug(f"/scan Type 3: {fn_i['name']} <-> {fn_j['name']}")
 
     # ── Layer 2: Type 3 and Type 4 ───────────────────────────────────────────
     layer1_names = {g["functionA"] for g in clone_groups} | {g["functionB"] for g in clone_groups}
@@ -2435,7 +2565,7 @@ def scan_file():
             # its own helper, they're being compared against each other,
             # post-refactor, and both are legitimate wrappers.
             if is_refactor_wrapper(fn_i["snippet"]) or is_refactor_wrapper(fn_j["snippet"]):
-                print(f"[CloneGuard] /scan skipping refactor wrappers (Layer 2): {fn_i['name']} <-> {fn_j['name']}")
+                logger.debug(f"/scan skipping refactor wrappers (Layer 2): {fn_i['name']} <-> {fn_j['name']}")
                 seen_pairs.add(pair_key)
                 continue
 
@@ -2533,9 +2663,9 @@ def scan_file():
             seen_pairs.add(pair_key)
             layer2_claimed.add(fn_i["name"])
             layer2_claimed.add(fn_j["name"])
-            print(f"[CloneGuard] /scan {clone_type}: {fn_i['name']} <-> {fn_j['name']}")
+            logger.debug(f"/scan {clone_type}: {fn_i['name']} <-> {fn_j['name']}")
 
-    print(f"[CloneGuard] /scan complete: {len(clone_groups)} clone groups found")
+    logger.info(f"/scan complete: {len(clone_groups)} clone groups found")
 
     return jsonify({
         "cloneGroups": clone_groups,
@@ -2606,6 +2736,6 @@ if __name__ == "__main__":
     #    port Render assigns when deployed there.
     port = int(os.environ.get("PORT", os.environ.get("CLONEGUARD_PORT", "8765")))
     host = "0.0.0.0"
-    print(f"[CloneGuard] Server running on {host}:{port}")
-    print(f"[CloneGuard] Test page: http://{host}:{port}/test")
+    logger.info(f"Server running on {host}:{port}")
+    logger.info(f"Test page: http://{host}:{port}/test")
     app.run(host=host, port=port, debug=False, threaded=False, use_reloader=False)

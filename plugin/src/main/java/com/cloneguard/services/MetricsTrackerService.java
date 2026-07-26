@@ -5,9 +5,10 @@ import com.google.gson.Gson;
 import com.intellij.openapi.components.Service;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.roots.ProjectRootManager;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.*;
+import com.intellij.psi.search.FilenameIndex;
+import com.intellij.psi.search.GlobalSearchScope;
 import com.intellij.psi.util.PsiTreeUtil;
 
 import java.io.IOException;
@@ -17,6 +18,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -252,13 +254,10 @@ public final class MetricsTrackerService {
 
     private Integer tryReadCurrentLineCount(String fileName) {
         try {
-            VirtualFile[] roots = ProjectRootManager.getInstance(project).getContentRoots();
-            for (VirtualFile root : roots) {
-                VirtualFile found = findByName(root, fileName);
-                if (found != null) {
-                    PsiFile psi = PsiManager.getInstance(project).findFile(found);
-                    if (psi != null) return countLines(psi.getText());
-                }
+            VirtualFile found = findByName(fileName);
+            if (found != null) {
+                PsiFile psi = PsiManager.getInstance(project).findFile(found);
+                if (psi != null) return countLines(psi.getText());
             }
         } catch (Exception e) {
             LOG.warn("CloneGuard: could not re-read file for metrics 'after' count: " + e.getMessage());
@@ -268,13 +267,10 @@ public final class MetricsTrackerService {
 
     private Integer tryReadCurrentComplexity(String fileName) {
         try {
-            VirtualFile[] roots = ProjectRootManager.getInstance(project).getContentRoots();
-            for (VirtualFile root : roots) {
-                VirtualFile found = findByName(root, fileName);
-                if (found != null) {
-                    PsiFile psi = PsiManager.getInstance(project).findFile(found);
-                    if (psi != null) return countCyclomaticComplexity(psi);
-                }
+            VirtualFile found = findByName(fileName);
+            if (found != null) {
+                PsiFile psi = PsiManager.getInstance(project).findFile(found);
+                if (psi != null) return countCyclomaticComplexity(psi);
             }
         } catch (Exception e) {
             LOG.warn("CloneGuard: could not re-read file for metrics complexity 'after' count: " + e.getMessage());
@@ -282,15 +278,26 @@ public final class MetricsTrackerService {
         return null;
     }
 
-    private VirtualFile findByName(VirtualFile dir, String name) {
-        if (!dir.isDirectory()) {
-            return dir.getName().equals(name) ? dir : null;
-        }
-        for (VirtualFile child : dir.getChildren()) {
-            VirtualFile result = findByName(child, name);
-            if (result != null) return result;
-        }
-        return null;
+    /**
+     * FIX (professor-flagged, 3.2 -- Medium): this used to manually
+     * recurse through every directory under each content root
+     * (dir.getChildren() on the project root, walking into
+     * node_modules/, .git/, build/, and every other massive directory a
+     * real project accumulates) with no depth limit at all -- slow on an
+     * ordinary project, and a genuine StackOverflowError risk on a
+     * deeply nested or symlinked directory tree.
+     *
+     * Replaced with IntelliJ's own FilenameIndex, which looks up a
+     * filename against the IDE's already-built project index instead of
+     * walking the filesystem by hand -- no recursion, no stack risk, and
+     * it naturally respects whatever directories the project has already
+     * excluded from indexing (build output, VCS metadata, etc.), which
+     * the old manual walk had no way to skip at all.
+     */
+    private VirtualFile findByName(String name) {
+        Collection<VirtualFile> found = FilenameIndex.getVirtualFilesByName(
+                project, name, GlobalSearchScope.projectScope(project));
+        return found.isEmpty() ? null : found.iterator().next();
     }
 
     /**
