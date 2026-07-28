@@ -29,6 +29,32 @@ public final class PythonServerClient {
         return com.cloneguard.settings.CloneGuardSettings.getInstance().getServerUrl();
     }
 
+    // FIX (professor-flagged, follow-up round -- High): the server now
+    // supports bearer-token auth, but nothing here was ever updated to
+    // actually send one -- every real request would get a 401 the
+    // moment a key is set on the server. Reads from the same
+    // CloneGuardSettings instance as baseUrl() above, same reasoning:
+    // an application-level setting, not per-project, and picked up
+    // fresh on every call rather than cached.
+    private static String apiKey() {
+        return com.cloneguard.settings.CloneGuardSettings.getInstance().getApiKey();
+    }
+
+    /**
+     * Applies the Authorization header to a request builder if a key is
+     * actually configured -- if apiKey() is blank (the default), this is
+     * a deliberate no-op, matching the server's own "no key set = auth
+     * skipped" behavior. Sending an empty "Bearer " header for no reason
+     * wouldn't help anything and could confuse a server-side log.
+     */
+    private static HttpRequest.Builder withAuth(HttpRequest.Builder builder) {
+        String key = apiKey();
+        if (!key.isEmpty()) {
+            builder.header("Authorization", "Bearer " + key);
+        }
+        return builder;
+    }
+
     private HttpClient http;
     private final Gson gson = new Gson();
 
@@ -45,9 +71,9 @@ public final class PythonServerClient {
 
     public boolean isServerAlive() {
         try {
-            HttpRequest req = HttpRequest.newBuilder()
+            HttpRequest req = withAuth(HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl() + "/health"))
-                    .timeout(Duration.ofSeconds(2))
+                    .timeout(Duration.ofSeconds(2)))
                     .GET().build();
             HttpResponse<String> resp = getHttp().send(req, HttpResponse.BodyHandlers.ofString());
             return resp.statusCode() == 200;
@@ -274,10 +300,10 @@ public final class PythonServerClient {
     }
 
     private HttpResponse<String> post(String path, String jsonBody) throws Exception {
-        HttpRequest req = HttpRequest.newBuilder()
+        HttpRequest req = withAuth(HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl() + path))
                 .timeout(Duration.ofSeconds(30))
-                .header("Content-Type", "application/json")
+                .header("Content-Type", "application/json"))
                 .POST(HttpRequest.BodyPublishers.ofString(jsonBody, StandardCharsets.UTF_8))
                 .build();
         return getHttp().send(req, HttpResponse.BodyHandlers.ofString());

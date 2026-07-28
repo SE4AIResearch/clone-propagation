@@ -59,6 +59,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CLONEGUARD_URL: ${{ secrets.CLONEGUARD_SERVER_URL }}
+          # FIX (professor-flagged, follow-up round -- High): same gap
+          # as clone-check.yml -- the server supports bearer-token auth,
+          # but this workflow's /suggest calls never actually sent one.
+          CLONEGUARD_API_KEY: ${{ secrets.CLONEGUARD_API_KEY }}
           PR_NUMBER: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
         run: |
@@ -67,6 +71,7 @@ jobs:
 
           GH_TOKEN = os.environ["GH_TOKEN"]
           CLONEGUARD_URL = os.environ.get("CLONEGUARD_URL", "http://localhost:8765")
+          CLONEGUARD_API_KEY = os.environ.get("CLONEGUARD_API_KEY", "")
           PR_NUMBER = os.environ["PR_NUMBER"]
           REPO = os.environ["REPO"]
 
@@ -221,9 +226,12 @@ jobs:
                           "nameB": name_b, "codeB": fn_b["code"],
                           "allFunctions": all_functions
                       }).encode()
+                      suggest_headers = {"Content-Type": "application/json"}
+                      if CLONEGUARD_API_KEY:
+                          suggest_headers["Authorization"] = f"Bearer {CLONEGUARD_API_KEY}"
                       req = urllib.request.Request(
                           f"{CLONEGUARD_URL}/suggest", data=payload,
-                          headers={"Content-Type": "application/json"}, method="POST"
+                          headers=suggest_headers, method="POST"
                       )
                       with urllib.request.urlopen(req, timeout=30) as resp:
                           suggestion = json.loads(resp.read().decode())

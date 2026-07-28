@@ -326,7 +326,6 @@ public class InlineSuggestionListener implements EditorFactoryListener {
             final String canonicalName = (rawMatchedFunction != null)
                     ? rawMatchedFunction.replaceAll("\\(\\)\\s*$", "").trim()
                     : null;
-            LOG.info("CloneGuard notification DEBUG: canonicalName=[" + canonicalName + "] duplicateName=[" + duplicateName + "]");
             String cloneTypeLabel = (result.cloneType != null) ? result.cloneType.label : "Clone";
             int similarityPercent = (int) Math.round(result.similarity * 100);
 
