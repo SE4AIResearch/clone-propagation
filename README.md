@@ -85,8 +85,19 @@ Add the provided GitHub Actions workflows to your repository (`.github/workflows
 
 The workflow re-verifies each selected item is still safe to refactor, applies the fix, and commits it directly to the branch.
 
-**Setup:** add your server's URL and API key as repository secrets — `CLONEGUARD_SERVER_URL` and `CLONEGUARD_API_KEY`.
+One-time setup, for whoever adds this workflow to a repository (not something plugin users ever need to do): add your server's URL and API key as repository secrets.
 
+On GitHub, go to your repository
+Settings → Secrets and variables → Actions
+Click New repository secret
+Add the first secret:
+Name: CLONEGUARD_SERVER_URL
+Value: your hosted server's URL (e.g. https://cloneguard-server.onrender.com)
+Click New repository secret again and add the second:
+Name: CLONEGUARD_API_KEY
+Value: your server's API key
+Copy clone-check.yml and apply-refactors.yml from this repo's .github/workflows/ folder into the same path in your own repository
+That's it — this is a one-time step per repository. Once both secrets are set, every Pull Request touching Java files is scanned automatically; individual reviewers and contributors never need to configure anything themselves.
 ---
 
 ## Configuration
