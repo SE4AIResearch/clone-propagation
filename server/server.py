@@ -40,7 +40,19 @@ logger = logging.getLogger("cloneguard")
 # level chatter is rarely useful, but a real WARNING from them still
 # surfaces) leaves CloneGuard's own "cloneguard" logger as the only one
 # actually affected by CLONEGUARD_LOG_LEVEL.
-for _noisy_logger in ("huggingface_hub", "urllib3", "filelock", "transformers"):
+#
+# UPDATE (found live again, on Render): the noise persisted even with
+# this fix in place. Root cause: huggingface_hub's message format --
+# `HTTP Request: {method} {url} "{http_version} {status}"` -- is
+# actually httpx's own log line format, not huggingface_hub's. Recent
+# huggingface_hub versions use httpx as their HTTP backend internally,
+# and httpx logs under its OWN separate logger name ("httpx"), a
+# completely different top-level logger from "huggingface_hub" in
+# Python's logging hierarchy -- silencing "huggingface_hub" was never
+# going to touch a log line actually emitted by "httpx". Added "httpx"
+# and "httpcore" (httpx's own underlying transport layer, which logs
+# separately at the same INFO level) to close the actual gap.
+for _noisy_logger in ("huggingface_hub", "urllib3", "filelock", "transformers", "httpx", "httpcore"):
     logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
 
 # Reduce native crashes on macOS when PyTorch/FAISS run together
