@@ -10,7 +10,7 @@ CloneGuard catches code duplication at the moment it's created — as you paste 
 
 AI coding assistants like GitHub Copilot and Cursor are very good at writing working code on demand but they have no visibility into the rest of your codebase. Ask one to write a function that sums an array, and it will, with no way of knowing an equivalent function already exists two files away. Traditional clone-detection tools don't help here either: they operate as a batch scan over a codebase that already exists, long after the moment a clone was actually introduced.
 
-CloneGuard is built around closing that timing gap specifically — detecting duplication close to the moment it's created, not after the fact.
+CloneGuard is built around closing that timing gap specifically detecting duplication close to the moment it's created, not after the fact.
 
 ---
 
