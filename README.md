@@ -32,7 +32,7 @@ CloneGuard is two components working together:
 - **An IntelliJ IDEA plugin** (Java) — lives entirely in your IDE, watches for pasted code, runs scans on request, and applies refactorings
 - **A Python backend server** (Flask) — handles the computationally heavier work: CodeBERT embeddings and FAISS similarity search for semantic clone detection
 
-The plugin checks locally first; the server is only called when a deeper, semantic comparison is actually needed. A third, independent path — a GitHub Actions workflow — calls the same server directly during Pull Request review, with no IDE involved at all.
+The plugin checks locally first; the server is only called when a deeper, semantic comparison is actually needed. A third, independent path — a GitHub Actions workflow calls the same server directly during Pull Request review, with no IDE involved at all.
 
 ---
 
