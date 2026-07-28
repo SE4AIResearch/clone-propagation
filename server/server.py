@@ -3,6 +3,7 @@ import os
 import re
 import threading
 import logging
+import secrets
 
 # FIX (professor-flagged, 2.6 -- Low): server.py used to log everything
 # through plain print() statements -- 51 of them, mixing rare startup
@@ -86,10 +87,19 @@ if not API_KEY:
           "set accepts requests from anyone on the internet.")
 
 # /health and /test are intentionally left unauthenticated: /health is
-# used by Render's own platform-level health checks, which have no way
-# to send a custom Authorization header; /test just serves a static
-# HTML test page with no data exposure or real compute cost.
-_UNAUTHENTICATED_ENDPOINTS = {"/health", "/test"}
+# used by CloneGuard's own health check, which has no way to send a
+# custom Authorization header; /test just serves a static HTML test
+# page with no data exposure or real compute cost.
+#
+# FIX (found live -- confirmed directly in a real deploy log): "/" is
+# ALSO exempted here, separately from "/health". Render's own
+# platform-level health probe hits the bare root path directly, not
+# "/health" -- observed a real "HEAD / HTTP/1.1" 401 in the deploy log
+# the moment auth was turned on, which could make Render's own
+# monitoring think the service is unhealthy even while it's actually
+# running fine. "/" has no real route handler behind it anyway (it
+# already 404s normally), so exempting it costs nothing.
+_UNAUTHENTICATED_ENDPOINTS = {"/health", "/test", "/"}
 
 
 # FIX (professor-flagged, 2.3 -- High): endpoints accepting raw source
@@ -120,7 +130,15 @@ def require_api_key():
     if request.path in _UNAUTHENTICATED_ENDPOINTS:
         return
     expected = f"Bearer {API_KEY}"
-    if request.headers.get("Authorization", "") != expected:
+    # FIX (professor-flagged, follow-up round -- Medium): plain string
+    # equality (!=) short-circuits at the FIRST mismatched character,
+    # meaning a correct guess up to some point takes measurably longer
+    # to reject than a totally wrong one -- an attacker can brute-force
+    # the key one character at a time by timing responses.
+    # secrets.compare_digest() always takes the same amount of time
+    # regardless of where (or whether) the strings differ, specifically
+    # built for comparing secrets like this.
+    if not secrets.compare_digest(request.headers.get("Authorization", ""), expected):
         return jsonify({"error": "Unauthorized"}), 401
 
 logger.info("Loading CodeBERT model...")
