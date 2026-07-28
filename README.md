@@ -2,7 +2,7 @@
 
 **AI-assisted code clone detection and automated refactoring for IntelliJ IDEA.**
 
-CloneGuard catches code duplication at the moment it's created — as you paste code, when you scan a file, or the instant a Pull Request is opened, instead of waiting for a separate audit long after the clone has already shipped. When it finds one, it doesn't just flag it: a confirmed clone connects directly to automated refactoring, so most duplicates are resolved in a single action rather than requiring you to rewrite the code by hand.
+CloneGuard catches code duplication at the moment it's created as you paste code, when you scan a file, or the instant a Pull Request is opened instead of waiting for a separate audit long after the clone has already shipped. When it finds one, it doesn't just flag it: a confirmed clone connects directly to automated refactoring, so most duplicates are resolved in a single action rather than requiring you to rewrite the code by hand.
 
 ---
 
@@ -10,7 +10,7 @@ CloneGuard catches code duplication at the moment it's created — as you paste 
 
 AI coding assistants like GitHub Copilot and Cursor are very good at writing working code on demand but they have no visibility into the rest of your codebase. Ask one to write a function that sums an array, and it will, with no way of knowing an equivalent function already exists two files away. Traditional clone-detection tools don't help here either: they operate as a batch scan over a codebase that already exists, long after the moment a clone was actually introduced.
 
-CloneGuard is built around closing that timing gap specifically detecting duplication close to the moment it's created, not after the fact.
+CloneGuard is built around closing that timing gap specifically for detecting duplication close to the moment it's created, not after the fact.
 
 ---
 
@@ -32,7 +32,8 @@ CloneGuard is two components working together:
 - **An IntelliJ IDEA plugin** (Java) — lives entirely in your IDE, watches for pasted code, runs scans on request, and applies refactorings
 - **A Python backend server** (Flask) — handles the computationally heavier work: CodeBERT embeddings and FAISS similarity search for semantic clone detection
 
-The plugin checks locally first; the server is only called when a deeper, semantic comparison is actually needed. A third, independent path — a GitHub Actions workflow calls the same server directly during Pull Request review, with no IDE involved at all.
+The plugin checks locally first; the server is only called when a deeper, semantic comparison is actually needed. A third, independent path - a GitHub Actions workflow calls the same server directly during Pull Request review, with no IDE involved at all.
+
 
 ---
 
@@ -45,11 +46,11 @@ The plugin checks locally first; the server is only called when a deeper, semant
 
 ### Installing the Plugin
 
-1. Download the latest plugin `.zip` from [Releases](#) *(or build it yourself — see below)*
+1. Download the latest plugin `.zip` 
 2. In IntelliJ: **Settings/Preferences → Plugins → ⚙️ → Install Plugin from Disk...**
 3. Select the downloaded `.zip` and restart the IDE
 
-No local server setup is required — the plugin is pre-configured to reach a persistently hosted detection server, so semantic (Type 3/4) detection works immediately after installation.
+No local server setup is required as the plugin is pre-configured to reach a persistently hosted detection server, so semantic (Type 3/4) detection works immediately after installation.
 
 ### Building the Plugin
 
@@ -85,19 +86,17 @@ Add the provided GitHub Actions workflows to your repository (`.github/workflows
 
 The workflow re-verifies each selected item is still safe to refactor, applies the fix, and commits it directly to the branch.
 
-One-time setup, for whoever adds this workflow to a repository (not something plugin users ever need to do): add your server's URL and API key as repository secrets.
+**One-time setup, for whoever adds this workflow to a repository** (not something plugin users ever need to do):
 
-On GitHub, go to your repository
-Settings → Secrets and variables → Actions
-Click New repository secret
-Add the first secret:
-Name: CLONEGUARD_SERVER_URL
-Value: your hosted server's URL (e.g. https://cloneguard-server.onrender.com)
-Click New repository secret again and add the second:
-Name: CLONEGUARD_API_KEY
-Value: your server's API key
-Copy clone-check.yml and apply-refactors.yml from this repo's .github/workflows/ folder into the same path in your own repository
-That's it — this is a one-time step per repository. Once both secrets are set, every Pull Request touching Java files is scanned automatically; individual reviewers and contributors never need to configure anything themselves.
+Go to **Settings → Secrets and variables → Actions → New repository secret** and add:
+
+| Name | Value |
+|---|---|
+| `CLONEGUARD_SERVER_URL` | Your hosted server's URL (e.g. `https://cloneguard-server.onrender.com`) |
+| `CLONEGUARD_API_KEY` | Your server's API key |
+
+Then copy `clone-check.yml` and `apply-refactors.yml` from this repo's `.github/workflows/` into your own. That's it — a one-time step per repository; individual reviewers and contributors never configure anything themselves.
+
 ---
 
 ## Configuration
@@ -120,7 +119,7 @@ Plugin settings are available under **Settings/Preferences → Tools → CloneGu
 | **Pull Up Method** | Type 1/2 clones duplicated across sibling subclasses sharing a superclass |
 | **Push Down Method** | A superclass method only ever used by one subclass |
 
-Pull Up and Push Down are only available in Scenarios 1 and 2 — GitHub's single-range comment interface can't express an edit spanning two separate locations, so Scenario 3 uses Extract Method and Method Delegation only.
+Pull Up and Push Down are only available in Scenarios 1 and 2 as GitHub's single-range comment interface can't express an edit spanning two separate locations, so Scenario 3 uses Extract Method and Method Delegation only.
 
 ---
 
@@ -144,10 +143,11 @@ clone-propagation/
 
 ---
 
-
 ## Team
 
 - Vaansh Virral Sanghrajka — [vsanghra@stevens.edu](mailto:vsanghra@stevens.edu)
 - Prof. Eman Alomar — [ealomar@stevens.edu](mailto:ealomar@stevens.edu)
 
 Stevens Institute of Technology
+
+---
