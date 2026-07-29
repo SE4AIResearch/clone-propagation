@@ -1,22 +1,20 @@
 public class ThresholdCountDemo {
     public int countAboveThreshold(int[] arr, int threshold) {
-        int count = 0;
-        for (int i = 0; i < arr.length; i++) {
+    return coreTallyAboveLimit(arr, threshold);
+}
+    public int tallyAboveLimit(int[] values, int limit) {
+    return coreTallyAboveLimit(values, limit);
+}
+
+private static int coreTallyAboveLimit(int[] arr, int threshold) {
+    int count = 0;
+    for (int i = 0; i < arr.length; i++) {
             if (arr[i] > threshold) {
                 count++;
             }
         }
-        return count;
-    }
-    public int tallyAboveLimit(int[] values, int limit) {
-        int tally = 0;
-        for (int j = 0; j < values.length; j++) {
-            if (values[j] > limit) {
-                tally++;
-            }
-        }
-        return tally;
-    }
+    return count;
+}
     public static void main(String[] args) {
         ThresholdCountDemo demo = new ThresholdCountDemo();
         int[] arr = {5, 3, 8, 1, 9, 2};
