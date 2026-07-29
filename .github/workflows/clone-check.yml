@@ -360,19 +360,26 @@ jobs:
                   "suggestion** without using this checklist.)\n\n"
               )
               for i, g in enumerate(groups, 1):
-                  # FIX (restored, found live): apply-refactors.yml's checkbox
-                  # parser expects an exact format --
-                  # "- [ ] **N.** `file`: `fnA()` <sep> `fnB()` -- Type X, Technique"
-                  # -- and the literal marker text "Select clones to refactor"
-                  # somewhere in the comment to identify it as a checklist
-                  # comment at all. Both were dropped when this comment was
-                  # rewritten to lead with inline suggestions; restoring them
-                  # here so /refactor works again as a real fallback path,
-                  # not just for clones that don't get an inline suggestion.
+                  # FIX (found live, testing the restored checklist): the
+                  # checkbox line was using g['filename'], which is
+                  # deliberately just os.path.basename(filepath) -- fine
+                  # for a clean, readable comment, but apply-refactors.yml
+                  # runs as a completely separate workflow later and has
+                  # NOTHING to work with except this comment's own text.
+                  # A bare basename like "SumSquaresDemo.java" gives it no
+                  # way to know the file actually lives at
+                  # "server/SumSquaresDemo.java" -- it tries
+                  # os.path.exists() on the bare name from the repo root,
+                  # finds nothing, and reports "not found", even though
+                  # the real file exists exactly where it's supposed to.
+                  # g['filepath'] (the full relative path, already tracked
+                  # separately alongside the display-only basename) is
+                  # what actually needs to round-trip through this
+                  # checkbox text, not g['filename'].
                   type_label = g["cloneType"].split("—")[0].strip()
                   technique = "Extract Method" if "Type 1" in type_label or "Type 2" in type_label else "Method Delegation"
                   body += (
-                      f"- [ ] **{i}.** `{g['filename']}`: `{g['functionA']}()` "
+                      f"- [ ] **{i}.** `{g.get('filepath', g['filename'])}`: `{g['functionA']}()` "
                       f"↔ `{g['functionB']}()` — {type_label}, {technique}\n"
                   )
 
