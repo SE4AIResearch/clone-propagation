@@ -36,6 +36,7 @@ public class TrendDashboardPanel {
     private final ChartPanel chartPanel;
     private final JPanel breakdownContainer;
     private final JPanel cloneTypeBreakdownContainer;
+    private final JPanel centerPanel;
 
     // Which file's trend is currently being shown — set by
     // CloneGuardToolWindowFactory.refreshTrendDashboard() right after
@@ -72,7 +73,7 @@ public class TrendDashboardPanel {
 
         root.add(topBar, BorderLayout.NORTH);
 
-        JPanel centerPanel = new JPanel();
+        centerPanel = new JPanel();
         centerPanel.setLayout(new BoxLayout(centerPanel, BoxLayout.Y_AXIS));
         centerPanel.setBorder(new EmptyBorder(8, 12, 8, 12));
 
@@ -156,6 +157,8 @@ public class TrendDashboardPanel {
             cloneTypeBreakdownContainer.removeAll();
             cloneTypeBreakdownContainer.revalidate();
             cloneTypeBreakdownContainer.repaint();
+            centerPanel.revalidate();
+            centerPanel.repaint();
             root.revalidate();
             root.repaint();
             return;
@@ -190,6 +193,8 @@ public class TrendDashboardPanel {
             // and repaint() on the top-level root container guarantees a
             // full layout + paint pass every time reload() runs,
             // regardless of which specific call site triggered it.
+            centerPanel.revalidate();
+            centerPanel.repaint();
             root.revalidate();
             root.repaint();
             return;
@@ -221,6 +226,20 @@ public class TrendDashboardPanel {
                 "%d session(s)  |  net %+d line(s)  |  net %+d complexity  |  %d duplicated line(s) eliminated  |  %d refactor(s) applied",
                 sessions.size(), totalNetLines, totalNetComplexity, totalDuplicatedEliminated, totalRefactors));
 
+        // FIX (found live): the summary line packs "line(s)" and
+        // "complexity" right next to each other with no explanation of
+        // how they differ -- easy to read as two views of the same
+        // number, when they're actually measuring different things.
+        // Lines is a volume count; complexity counts branching (if/for/
+        // while/switch/catch/ternary/&&/||). A refactor can shrink one
+        // without moving the other at all. A tooltip on hover explains
+        // this without cluttering the compact summary line itself.
+        summaryLabel.setToolTipText(
+                "<html><b>Line(s)</b> counts raw file size — how much text changed.<br>"
+                        + "<b>Complexity</b> counts branching (if/for/while/switch/catch/ternary/&amp;&amp;/||) —<br>"
+                        + "how many independent paths a reader has to follow.<br>"
+                        + "A refactor can move one without moving the other.</html>");
+
         chartPanel.setSessions(sessions);
 
         breakdownContainer.removeAll();
@@ -248,6 +267,8 @@ public class TrendDashboardPanel {
         // the chart and every other child actually repaints, regardless
         // of whether this ran from the Refresh button or the automatic
         // post-scan call.
+        centerPanel.revalidate();
+        centerPanel.repaint();
         root.revalidate();
         root.repaint();
     }

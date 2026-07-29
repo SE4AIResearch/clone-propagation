@@ -352,6 +352,30 @@ jobs:
               for i, g in enumerate(groups, 1):
                   body += f"| {i} | {g['cloneType']} | `{g['functionA']}()` | `{g['functionB']}()` | {g['similarity']} | {g['detectionLayer']} | {g['severity']} |\n"
 
+              body += "\n### Select clones to refactor\n"
+              body += (
+                  "Check the boxes for the clones you want fixed, then comment "
+                  "`/refactor` to apply them. (Clones with a one-click inline "
+                  "suggestion above can also be applied directly via **Commit "
+                  "suggestion** without using this checklist.)\n\n"
+              )
+              for i, g in enumerate(groups, 1):
+                  # FIX (restored, found live): apply-refactors.yml's checkbox
+                  # parser expects an exact format --
+                  # "- [ ] **N.** `file`: `fnA()` <sep> `fnB()` -- Type X, Technique"
+                  # -- and the literal marker text "Select clones to refactor"
+                  # somewhere in the comment to identify it as a checklist
+                  # comment at all. Both were dropped when this comment was
+                  # rewritten to lead with inline suggestions; restoring them
+                  # here so /refactor works again as a real fallback path,
+                  # not just for clones that don't get an inline suggestion.
+                  type_label = g["cloneType"].split("—")[0].strip()
+                  technique = "Extract Method" if "Type 1" in type_label or "Type 2" in type_label else "Method Delegation"
+                  body += (
+                      f"- [ ] **{i}.** `{g['filename']}`: `{g['functionA']}()` "
+                      f"↔ `{g['functionB']}()` — {type_label}, {technique}\n"
+                  )
+
               body += "\n### Recommendations\n"
               for i, g in enumerate(groups, 1):
                   body += f"**{i}. {g['functionA']}() ↔ {g['functionB']}():** {g['recommendation']}\n\n"
