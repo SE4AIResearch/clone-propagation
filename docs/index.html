@@ -38,6 +38,10 @@
     </div>
 
     <div class="diff-demo" id="diffDemo">
+      <div class="detect-toast" id="detectToast">
+        <span class="toast-dot"></span>
+        Type 4 clone detected
+      </div>
       <div class="diff-titlebar">
         <span class="tdot" style="background:#B5473F"></span>
         <span class="tdot" style="background:#E0B84C"></span>
@@ -58,6 +62,16 @@
 <span class="line line-fix" id="fixLine2"><span class="ln-num">6</span>    return computeGcdLoop(a, b);</span>
 <span class="line line-fix" id="fixLine3"><span class="ln-num">7</span>}</span>
       </div>
+      <div class="thinking-row" id="thinkingRow">
+        <span class="thinking-dots"><span></span><span></span><span></span></span>
+        CloneGuard is analyzing computeGcdRecursion()...
+      </div>
+    </div>
+
+    <div class="stat-strip">
+      <div class="stat"><div class="stat-num">3</div><div class="stat-label">Entry Points</div></div>
+      <div class="stat"><div class="stat-num">4</div><div class="stat-label">Refactoring Techniques</div></div>
+      <div class="stat"><div class="stat-num">2</div><div class="stat-label">Detection Layers</div></div>
     </div>
   </div>
 </header>
@@ -138,7 +152,21 @@
 
 <script src="reveal.js"></script>
 <script>
+  // Sequenced to feel like a live agent actually working, not an
+  // instant swap: toast appears, "thinking" indicator runs, then
+  // the fix resolves -- mirroring the real order CloneGuard follows
+  // (detect, then act) rather than showing everything at once.
   window.addEventListener('load', () => {
+    setTimeout(() => {
+      const toast = document.getElementById('detectToast');
+      if (toast) toast.classList.add('shown');
+    }, 600);
+
+    setTimeout(() => {
+      const thinking = document.getElementById('thinkingRow');
+      if (thinking) thinking.classList.add('active');
+    }, 1400);
+
     setTimeout(() => {
       ['dupeLine1','dupeLine2','dupeLine3','dupeLine4'].forEach(id => {
         const el = document.getElementById(id);
@@ -148,7 +176,11 @@
         const el = document.getElementById(id);
         if (el) el.classList.add('shown');
       });
-    }, 1800);
+      const thinking = document.getElementById('thinkingRow');
+      if (thinking) thinking.classList.remove('active');
+      const toast = document.getElementById('detectToast');
+      if (toast) toast.classList.remove('shown');
+    }, 3200);
   });
 </script>
 
