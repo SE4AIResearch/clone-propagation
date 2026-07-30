@@ -303,7 +303,7 @@ public class TrendDashboardPanel {
 
             int w = getWidth();
             int h = getHeight();
-            int padLeft = 40, padRight = 16, padTop = 12, padBottom = 24;
+            int padLeft = 40, padRight = 16, padTop = 26, padBottom = 24;
 
             g2.setColor(JBColor.background().brighter());
             g2.fillRect(0, 0, w, h);
@@ -314,6 +314,11 @@ public class TrendDashboardPanel {
                 g2.dispose();
                 return;
             }
+
+            // Legend, since grey-vs-colored bars mean nothing without a
+            // key explaining them. Kept in the top padding strip, above
+            // the chart's own drawing area, so it never overlaps data.
+            drawLegend(g2, padLeft);
 
             int n = sessions.size();
             int maxLoc = 1;
@@ -374,6 +379,39 @@ public class TrendDashboardPanel {
          * per session, in the style of a standard grouped-bar histogram,
          * rather than a single floating shape.
          */
+        /**
+         * Draws a small color key above the chart: grey = before, green =
+         * after (improved), orange = after (grew). Without this, grey vs
+         * colored bars mean nothing to a first-time viewer.
+         */
+        private void drawLegend(Graphics2D g2, int startX) {
+            int swatchSize = 10;
+            int y = 4;
+            int x = startX;
+
+            Color grey = JBColor.GRAY;
+            Color green = new JBColor(new Color(46, 160, 90), new Color(90, 200, 130));
+            Color orange = new JBColor(new Color(214, 100, 40), new Color(230, 140, 80));
+
+            x = drawLegendItem(g2, x, y, swatchSize, grey, "Before");
+            x = drawLegendItem(g2, x, y, swatchSize, green, "After — improved");
+            drawLegendItem(g2, x, y, swatchSize, orange, "After — grew");
+        }
+
+        private int drawLegendItem(Graphics2D g2, int x, int y, int swatchSize, Color color, String label) {
+            g2.setColor(color);
+            g2.fillRect(x, y, swatchSize, swatchSize);
+            g2.setColor(JBColor.GRAY.darker());
+            g2.drawRect(x, y, swatchSize, swatchSize);
+
+            g2.setColor(JBColor.GRAY);
+            int textX = x + swatchSize + 4;
+            g2.drawString(label, textX, y + swatchSize);
+
+            FontMetrics fm = g2.getFontMetrics();
+            return textX + fm.stringWidth(label) + 14;
+        }
+
         private void drawSessionBars(Graphics2D g2, RefactorSession s, int x, int barWidth,
                                       int padTop, int chartH, int maxLoc) {
             int baseline = padTop + chartH;
