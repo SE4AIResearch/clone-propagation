@@ -9,7 +9,7 @@ import com.intellij.ui.components.JBScrollPane;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import java.awt.*;
-import java.awt.geom.Ellipse2D;
+
 import java.util.List;
 
 /**
@@ -341,9 +341,21 @@ public class TrendDashboardPanel {
                 xs[i] = (n == 1) ? padLeft + chartW / 2 : padLeft + (chartW * i / (n - 1));
             }
 
-            drawLine(g2, sessions, xs, padTop, chartH, maxLoc, true, JBColor.GRAY);
-            drawLine(g2, sessions, xs, padTop, chartH, maxLoc, false,
-                    new JBColor(new Color(46, 160, 90), new Color(90, 200, 130)));
+            // FIX (found live, requested change): the previous two-line
+            // rendering (dashed grey for "before", solid green for
+            // "after", with small dot markers) asked the viewer to
+            // mentally connect two separate lines to see what changed in
+            // any one session -- easy to miss at a glance, especially
+            // with several sessions close together. A box per session,
+            // spanning directly from its "before" value to its "after"
+            // value, shows the same information as one shape instead of
+            // two lines: taller box = bigger change, box color = whether
+            // that change was an improvement or not, no mental
+            // reconstruction required.
+            int boxWidth = Math.max(6, Math.min(28, chartW / Math.max(1, n) / 2));
+            for (int i = 0; i < n; i++) {
+                drawSessionBox(g2, sessions.get(i), xs[i], boxWidth, padTop, chartH, maxLoc);
+            }
 
             g2.setColor(JBColor.GRAY);
             int labelStep = Math.max(1, n / 8);
@@ -354,26 +366,40 @@ public class TrendDashboardPanel {
             g2.dispose();
         }
 
-        private void drawLine(Graphics2D g2, List<RefactorSession> sessions, int[] xs,
-                               int padTop, int chartH, int maxLoc, boolean before, Color color) {
-            int n = sessions.size();
-            int[] ys = new int[n];
-            for (int i = 0; i < n; i++) {
-                int value = before ? sessions.get(i).locBefore : sessions.get(i).locAfter;
-                ys[i] = padTop + chartH - (int) ((long) chartH * value / maxLoc);
-            }
+        /**
+         * Draws one session as a box spanning from its "before" LOC value
+         * to its "after" value. Green fill means the file got smaller
+         * (improved); orange fill means it grew. A thin horizontal tick
+         * marks the exact "after" value inside the box, since that's the
+         * number that matters most once the session is done.
+         */
+        private void drawSessionBox(Graphics2D g2, RefactorSession s, int x, int boxWidth,
+                                     int padTop, int chartH, int maxLoc) {
+            int yBefore = padTop + chartH - (int) ((long) chartH * s.locBefore / maxLoc);
+            int yAfter = padTop + chartH - (int) ((long) chartH * s.locAfter / maxLoc);
 
-            g2.setColor(color);
-            g2.setStroke(before
-                    ? new BasicStroke(1.5f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 0, new float[]{4, 4}, 0)
-                    : new BasicStroke(2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+            int top = Math.min(yBefore, yAfter);
+            int bottom = Math.max(yBefore, yAfter);
+            int boxHeight = Math.max(3, bottom - top); // minimum height so a near-zero change still reads as a visible box
 
-            for (int i = 0; i < n - 1; i++) {
-                g2.drawLine(xs[i], ys[i], xs[i + 1], ys[i + 1]);
-            }
-            for (int i = 0; i < n; i++) {
-                g2.fill(new Ellipse2D.Double(xs[i] - 3, ys[i] - 3, 6, 6));
-            }
+            boolean improved = s.locAfter <= s.locBefore;
+            Color fill = improved
+                    ? new JBColor(new Color(46, 160, 90, 160), new Color(90, 200, 130, 160))
+                    : new JBColor(new Color(214, 100, 40, 160), new Color(230, 140, 80, 160));
+            Color edge = improved
+                    ? new JBColor(new Color(46, 160, 90), new Color(90, 200, 130))
+                    : new JBColor(new Color(214, 100, 40), new Color(230, 140, 80));
+
+            g2.setColor(fill);
+            g2.fillRect(x - boxWidth / 2, top, boxWidth, boxHeight);
+            g2.setColor(edge);
+            g2.setStroke(new BasicStroke(1.5f));
+            g2.drawRect(x - boxWidth / 2, top, boxWidth, boxHeight);
+
+            // tick line at the exact "after" value, so the precise end
+            // state is still readable even though the box itself only
+            // shows a range
+            g2.drawLine(x - boxWidth / 2, yAfter, x + boxWidth / 2, yAfter);
         }
     }
 }
