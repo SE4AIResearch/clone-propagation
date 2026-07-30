@@ -43,58 +43,76 @@ public class ScanFileAction extends AnAction {
             return;
         }
 
-        // FIX (found live, Trend Dashboard testing): this used to sit
-        // AFTER the "need at least 2 functions" guard below. That meant a
-        // scan attempt on a file that had just been reduced to a single
-        // method BY a successful Pull Up -- exactly the case where a
-        // duplicate pair was consolidated into one shared method -- would
-        // hit that guard, return early, and never reach this call at all.
-        // The session from the refactor that just happened would never
-        // get finalized or written to the log, silently losing it.
-        // Confirmed live: Pull Up succeeded, the file dropped to one
-        // method, the next scan was correctly rejected by the guard, and
-        // the Trend Dashboard still showed zero sessions afterward.
-        //
-        // A session boundary should be tied to the USER'S ACTION of
-        // attempting a new scan, not to whether that scan happens to find
-        // enough functions to proceed -- so this now fires unconditionally
-        // at the top of every scan attempt, before any early return below.
-        com.cloneguard.services.MetricsTrackerService.getInstance(project).startSession(psiFile);
+        final PsiFile finalPsiFile = psiFile;
 
-        // Pre-check function count on EDT (we're already in read-safe context here)
+        // CHANGED (Understand integration): startSession() now shells
+        // out to the `und` command-line tool via UnderstandMetricsService
+        // -- a real create/add/analyze/metrics cycle that can take
+        // several actual seconds, not the near-instant in-house PSI
+        // traversal it used to be. It USED to be safe to call directly
+        // here on the EDT (actionPerformed runs on the UI thread) since
+        // it was effectively free; now doing that would freeze the
+        // entire IDE for the duration of the Understand analysis on
+        // every single scan. Moved inside the existing
+        // Task.Backgroundable block below instead, alongside the other
+        // genuinely slow work (scanner.scanFile, findPushDownCandidates)
+        // that was already correctly backgrounded.
+        //
+        // The "need at least 2 functions" pre-check below still runs on
+        // the EDT first, same as before -- extractFunctions() is cheap
+        // PSI-only work, no reason to move it. Only startSession() itself
+        // (and, correspondingly, the session-finalization work inside
+        // it) moves into the background task.
         Map<String, String> functions = scanner.extractFunctions(psiFile);
         if (functions.size() < 2) {
-            // The session above was just finalized regardless of whether
-            // this scan can proceed — refresh the dashboard tab here too,
-            // not just on the success path below, so the user doesn't
-            // have to know to click Refresh manually after a scan that
-            // happens to hit this guard.
-            CloneGuardToolWindowFactory.refreshTrendDashboard(project, psiFile.getName());
-            Messages.showInfoMessage(project,
-                "Need at least 2 functions to scan for clones.\nFound: " + functions.size(),
-                "CloneGuard");
+            // Session boundary must still be recorded even when this
+            // guard rejects the scan (see the original FIX note this
+            // replaces) -- but startSession() itself is now potentially
+            // slow, so this rejection path also needs to run it off the
+            // EDT rather than block here waiting on Understand.
+            ProgressManager.getInstance().run(
+                new Task.Backgroundable(project, "CloneGuard: Recording session...", false) {
+                    @Override
+                    public void run(@NotNull ProgressIndicator indicator) {
+                        indicator.setIndeterminate(true);
+                        com.cloneguard.services.MetricsTrackerService.getInstance(project).startSession(finalPsiFile);
+                        com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater(() -> {
+                            CloneGuardToolWindowFactory.refreshTrendDashboard(project, finalPsiFile.getName());
+                            Messages.showInfoMessage(project,
+                                    "Need at least 2 functions to scan for clones.\nFound: " + functions.size(),
+                                    "CloneGuard");
+                        });
+                    }
+                }
+            );
             return;
         }
-
-        final PsiFile finalPsiFile = psiFile;
 
         ProgressManager.getInstance().run(
             new Task.Backgroundable(project, "CloneGuard: Scanning for clones...", false) {
                 @Override
                 public void run(@NotNull ProgressIndicator indicator) {
                     indicator.setIndeterminate(true);
+                    indicator.setText("Recording session metrics (Understand)...");
+
+                    // Moved here from the top of actionPerformed() -- see
+                    // the comment above for why. Runs before the actual
+                    // clone scan below, same ordering as originally
+                    // intended, just now genuinely off the UI thread.
+                    com.cloneguard.services.MetricsTrackerService.getInstance(project).startSession(finalPsiFile);
+
                     indicator.setText("Analysing " + finalPsiFile.getName() + "...");
 
                     // PSI access must be wrapped in ReadAction when on background thread
                     List<CloneGroup> groups = ReadAction.compute(() ->
-                        scanner.scanFile(finalPsiFile)
+                            scanner.scanFile(finalPsiFile)
                     );
 
                     // Push Down candidates are a separate, independent analysis
                     // from clone detection (no duplicated pair involved) — run
                     // it in its own ReadAction alongside the clone scan above.
                     List<PushDownCandidate> pushDownCandidates = ReadAction.compute(() ->
-                        scanner.findPushDownCandidates(finalPsiFile)
+                            scanner.findPushDownCandidates(finalPsiFile)
                     );
 
                     LOG.info("[CloneGuard] Scan complete: " + groups.size() + " clone group(s), " +

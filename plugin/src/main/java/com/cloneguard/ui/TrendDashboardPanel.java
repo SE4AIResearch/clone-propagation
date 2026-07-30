@@ -26,6 +26,16 @@ import java.util.List;
  * whether a new library could be safely added, this draws directly with
  * Graphics2D. It's a deliberately simple two-line chart (LOC before /
  * LOC after per session), not a general-purpose charting component.
+ *
+ * CHANGED: complexity, WMC, CBO, DIT, and NOC are now sourced from
+ * SciTools Understand rather than an in-house PSI-based formula (see
+ * MetricsTrackerService / UnderstandMetricsService). Since Understand
+ * is an external, separately-licensed desktop tool, any given session
+ * may have RefactorSession.understandAvailable == false if it wasn't
+ * reachable when that session was recorded -- the metrics row below
+ * checks this explicitly and shows a clear "Understand not available"
+ * notice instead of silently displaying zeros that would look like a
+ * genuinely clean, zero-complexity file.
  */
 public class TrendDashboardPanel {
 
@@ -36,6 +46,8 @@ public class TrendDashboardPanel {
     private final ChartPanel chartPanel;
     private final JPanel breakdownContainer;
     private final JPanel cloneTypeBreakdownContainer;
+    private final JPanel understandMetricsContainer;
+    private final JLabel understandStatusLabel;
     private final JPanel centerPanel;
 
     // Which file's trend is currently being shown — set by
@@ -115,6 +127,28 @@ public class TrendDashboardPanel {
         cloneTypeBreakdownContainer.setOpaque(false);
         centerPanel.add(cloneTypeBreakdownContainer);
 
+        centerPanel.add(Box.createVerticalStrut(14));
+
+        // NEW: Understand-derived OO metrics section (WMC, CBO, DIT,
+        // NOC), plus a status label that's shown instead of the chips
+        // whenever the most recent session didn't have Understand data.
+        JLabel understandLabel = new JLabel("Understand metrics (latest session)");
+        understandLabel.setFont(understandLabel.getFont().deriveFont(Font.BOLD, 12f));
+        understandLabel.setBorder(new EmptyBorder(0, 0, 6, 0));
+        understandLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        centerPanel.add(understandLabel);
+
+        understandStatusLabel = new JLabel(" ");
+        understandStatusLabel.setForeground(JBColor.GRAY);
+        understandStatusLabel.setFont(understandStatusLabel.getFont().deriveFont(Font.ITALIC, 12f));
+        understandStatusLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        centerPanel.add(understandStatusLabel);
+
+        understandMetricsContainer = new JPanel(new FlowLayout(FlowLayout.LEFT, 14, 0));
+        understandMetricsContainer.setAlignmentX(Component.LEFT_ALIGNMENT);
+        understandMetricsContainer.setOpaque(false);
+        centerPanel.add(understandMetricsContainer);
+
         JBScrollPane scroll = new JBScrollPane(centerPanel);
         scroll.setBorder(null);
         root.add(scroll, BorderLayout.CENTER);
@@ -157,6 +191,10 @@ public class TrendDashboardPanel {
             cloneTypeBreakdownContainer.removeAll();
             cloneTypeBreakdownContainer.revalidate();
             cloneTypeBreakdownContainer.repaint();
+            understandMetricsContainer.removeAll();
+            understandMetricsContainer.revalidate();
+            understandMetricsContainer.repaint();
+            understandStatusLabel.setText(" ");
             centerPanel.revalidate();
             centerPanel.repaint();
             root.revalidate();
@@ -177,6 +215,10 @@ public class TrendDashboardPanel {
             cloneTypeBreakdownContainer.removeAll();
             cloneTypeBreakdownContainer.revalidate();
             cloneTypeBreakdownContainer.repaint();
+            understandMetricsContainer.removeAll();
+            understandMetricsContainer.revalidate();
+            understandMetricsContainer.repaint();
+            understandStatusLabel.setText(" ");
             // FIX (found live, Trend Dashboard testing): clicking the
             // Refresh button visibly did nothing, even though the SAME
             // underlying reload() call worked correctly when triggered
@@ -209,7 +251,9 @@ public class TrendDashboardPanel {
 
         for (RefactorSession s : sessions) {
             totalNetLines += s.netLinesChanged();
-            totalNetComplexity += s.netComplexityChanged();
+            if (s.understandAvailable) {
+                totalNetComplexity += s.netComplexityChanged();
+            }
             totalDuplicatedEliminated += s.duplicatedLinesEliminated;
             totalRefactors += s.totalRefactors();
             extractTotal += s.extractCount;
@@ -238,7 +282,8 @@ public class TrendDashboardPanel {
                 "<html><b>Line(s)</b> counts raw file size — how much text changed.<br>"
                         + "<b>Complexity</b> counts branching (if/for/while/switch/catch/ternary/&amp;&amp;/||) —<br>"
                         + "how many independent paths a reader has to follow.<br>"
-                        + "A refactor can move one without moving the other.</html>");
+                        + "A refactor can move one without moving the other.<br>"
+                        + "Complexity, WMC, CBO, DIT, and NOC are computed by SciTools Understand.</html>");
 
         chartPanel.setSessions(sessions);
 
@@ -263,6 +308,29 @@ public class TrendDashboardPanel {
         cloneTypeBreakdownContainer.revalidate();
         cloneTypeBreakdownContainer.repaint();
 
+        // NEW: Understand-derived metrics for the MOST RECENT session
+        // only (WMC/CBO/DIT/NOC are point-in-time class design metrics,
+        // not something that reads naturally as a running total the way
+        // "refactors applied" does). Falls back to a clear status
+        // message rather than showing misleading zeros if Understand
+        // wasn't reachable when that session was recorded.
+        RefactorSession latest = sessions.get(sessions.size() - 1);
+        understandMetricsContainer.removeAll();
+        if (latest.understandAvailable) {
+            understandStatusLabel.setText(" ");
+            understandMetricsContainer.add(breakdownChip("CC " + latest.complexityAfter, 0, new Color(99, 90, 197)));
+            understandMetricsContainer.add(understandChip("WMC", latest.wmcAfter, new Color(46, 139, 87)));
+            understandMetricsContainer.add(understandChip("CBO", latest.cboAfter, new Color(197, 90, 17)));
+            understandMetricsContainer.add(understandChip("DIT", latest.ditAfter, new Color(184, 134, 11)));
+            understandMetricsContainer.add(understandChip("NOC", latest.nocAfter, new Color(90, 143, 214)));
+        } else {
+            understandStatusLabel.setText(
+                    "Understand not available for the most recent session — install and license SciTools Understand, "
+                            + "with 'und' on your PATH, to see WMC/CBO/DIT/NOC here.");
+        }
+        understandMetricsContainer.revalidate();
+        understandMetricsContainer.repaint();
+
         // Same safety net as the empty-state branch above — guarantees
         // the chart and every other child actually repaints, regardless
         // of whether this ran from the Refresh button or the automatic
@@ -274,7 +342,15 @@ public class TrendDashboardPanel {
     }
 
     private JLabel breakdownChip(String label, int count, Color color) {
-        JLabel chip = new JLabel("\u25CF " + label + " " + count);
+        JLabel chip = new JLabel("\u25CF " + label + (count > 0 ? " " + count : ""));
+        chip.setForeground(color);
+        chip.setFont(chip.getFont().deriveFont(Font.PLAIN, 12f));
+        return chip;
+    }
+
+    /** Same visual style as breakdownChip, but always shows "Label: value" -- used for the Understand metrics row, where 0 is a genuine, meaningful value (not "nothing happened yet"). */
+    private JLabel understandChip(String label, int value, Color color) {
+        JLabel chip = new JLabel("\u25CF " + label + ": " + value);
         chip.setForeground(color);
         chip.setFont(chip.getFont().deriveFont(Font.PLAIN, 12f));
         return chip;
@@ -371,14 +447,6 @@ public class TrendDashboardPanel {
             g2.dispose();
         }
 
-        /**
-         * Draws one session as two adjacent bars, both rising from the
-         * chart's zero baseline: a grey bar for "before" LOC and a
-         * colored bar for "after" LOC. Green after-bar means the file got
-         * smaller (improved); orange means it grew. Two side-by-side bars
-         * per session, in the style of a standard grouped-bar histogram,
-         * rather than a single floating shape.
-         */
         /**
          * Draws a small color key above the chart: grey = before, green =
          * after (improved), orange = after (grew). Without this, grey vs

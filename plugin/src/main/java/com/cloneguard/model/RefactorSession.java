@@ -40,14 +40,40 @@ public class RefactorSession {
     public int type3Count;
     public int type4Count;
 
-    // EXTENDED: total cyclomatic complexity summed across every method
-    // in the file, same before/after philosophy as locBefore/locAfter.
-    // Computed via real PSI traversal (see MetricsTrackerService),
-    // not a text heuristic -- unlike LOC, complexity genuinely needs to
-    // know real control-flow structure (if/for/while/case/&&/||/ternary),
-    // which only PSI can reliably provide.
+    // Total cyclomatic complexity across the file, before/after this
+    // session. Previously computed via in-house PSI traversal;
+    // now sourced from SciTools Understand (see
+    // UnderstandMetricsService), the same "Cyclomatic" value used
+    // throughout the CloneGuard paper's evaluation methodology, rather
+    // than a custom unvalidated formula.
     public int complexityBefore;
     public int complexityAfter;
+
+    // NEW: additional OO design metrics from Understand, not previously
+    // tracked in-app at all -- WMC (weighted methods per class, summed
+    // cyclomatic complexity across the class's methods), CBO (coupling
+    // between objects, how many other classes this one references),
+    // DIT (depth of inheritance tree), NOC (number of direct
+    // subclasses). Each has a before/after pair, same philosophy as
+    // locBefore/locAfter and complexityBefore/complexityAfter.
+    public int wmcBefore;
+    public int wmcAfter;
+    public int cboBefore;
+    public int cboAfter;
+    public int ditBefore;
+    public int ditAfter;
+    public int nocBefore;
+    public int nocAfter;
+
+    // NEW: true only if Understand was actually reachable and returned
+    // real data for BOTH the "before" and "after" snapshot of this
+    // session. If false, every *Before/*After field above other than
+    // loc/duplicatedLines/refactor counts is meaningless (left at 0,
+    // not a genuine "zero complexity" result) -- the dashboard must
+    // check this before displaying any Understand-derived number, so a
+    // missing-tool state never gets confused with an actually-clean
+    // file.
+    public boolean understandAvailable;
 
     public RefactorSession() {
         // Required by Gson for deserialization.
@@ -65,5 +91,15 @@ public class RefactorSession {
     /** Positive means the file's total cyclomatic complexity dropped. */
     public int netComplexityChanged() {
         return complexityBefore - complexityAfter;
+    }
+
+    /** Positive means WMC dropped (methods got individually simpler). */
+    public int netWmcChanged() {
+        return wmcBefore - wmcAfter;
+    }
+
+    /** Positive means coupling dropped (file depends on fewer other classes). */
+    public int netCboChanged() {
+        return cboBefore - cboAfter;
     }
 }

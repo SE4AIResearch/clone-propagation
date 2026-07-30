@@ -12,3 +12,7 @@ server/.idea/
 # macOS
 .DS_Store
 **/.DS_Store
+.vscode/
+cloneguard-metrics.und/
+cloneguard_metrics.csv
+plugin/bin/

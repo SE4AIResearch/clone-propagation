@@ -9,7 +9,6 @@ import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.*;
 import com.intellij.psi.search.FilenameIndex;
 import com.intellij.psi.search.GlobalSearchScope;
-import com.intellij.psi.util.PsiTreeUtil;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -46,6 +45,18 @@ import java.util.regex.Pattern;
  * scenario document described for this feature, and consistent with
  * this codebase's existing use of Gson elsewhere (see
  * PythonServerClient.java) rather than introducing a new JSON library.
+ *
+ * CHANGED: complexity (and the new WMC/CBO/DIT/NOC metrics) are now
+ * computed via SciTools Understand (UnderstandMetricsService) rather
+ * than the previous in-house PSI-based cyclomatic complexity formula
+ * that lived directly in this class. This is a real, meaningful
+ * dependency change: every user now needs Understand installed and
+ * licensed, with `und` on their PATH, for these numbers to populate at
+ * all. If Understand isn't available, the session is still recorded
+ * (LOC and refactor-type/clone-type breakdowns still work exactly as
+ * before), but understandAvailable=false and every complexity/WMC/CBO/
+ * DIT/NOC field is left at 0 rather than showing a misleading real-
+ * looking number.
  */
 @Service(Service.Level.PROJECT)
 public final class MetricsTrackerService {
@@ -56,6 +67,7 @@ public final class MetricsTrackerService {
 
     private final Project project;
     private final Gson gson = new Gson();
+    private final UnderstandMetricsService understandService;
 
     // Current in-progress session state. Null fileName means no session
     // is currently open. Deliberately private with no getters — these
@@ -63,7 +75,7 @@ public final class MetricsTrackerService {
     // class should be reading partial state.
     private String currentFileName;
     private int currentLocBefore;
-    private int currentComplexityBefore;
+    private UnderstandMetricsService.UnderstandMetrics currentMetricsBefore; // null if Understand unavailable
     private int currentExtractCount;
     private int currentDelegateCount;
     private int currentPullUpCount;
@@ -78,6 +90,7 @@ public final class MetricsTrackerService {
 
     public MetricsTrackerService(Project project) {
         this.project = project;
+        this.understandService = project.getService(UnderstandMetricsService.class);
     }
 
     public static MetricsTrackerService getInstance(Project project) {
@@ -88,13 +101,21 @@ public final class MetricsTrackerService {
      * Called from ScanFileAction at the start of every manual scan.
      * Finalizes and persists the PREVIOUS session first (if it had any
      * refactor activity), then opens a fresh baseline for this new scan.
+     *
+     * NOTE: this now calls out to the `und` command-line tool, which can
+     * take several real seconds (create + add + analyze + metrics
+     * export), not the near-instant PSI traversal this used to be.
+     * ScanFileAction must run this from a background task (it already
+     * wraps its scan in Task.Backgroundable) -- calling this directly on
+     * the UI thread would freeze the IDE for the duration of the
+     * Understand analysis.
      */
     public synchronized void startSession(PsiFile psiFile) {
         finalizeCurrentSessionIfDirty();
 
         currentFileName = psiFile.getName();
         currentLocBefore = countLines(psiFile.getText());
-        currentComplexityBefore = countCyclomaticComplexity(psiFile);
+        currentMetricsBefore = analyzeWithUnderstand(psiFile);
         currentExtractCount = 0;
         currentDelegateCount = 0;
         currentPullUpCount = 0;
@@ -221,8 +242,6 @@ public final class MetricsTrackerService {
         session.fileName = currentFileName;
         session.locBefore = currentLocBefore;
         session.locAfter = currentLocBefore; // overwritten below if re-readable
-        session.complexityBefore = currentComplexityBefore;
-        session.complexityAfter = currentComplexityBefore; // overwritten below if re-readable
         session.duplicatedLinesEliminated = currentDuplicatedLinesEliminated;
         session.extractCount = currentExtractCount;
         session.delegateCount = currentDelegateCount;
@@ -233,19 +252,38 @@ public final class MetricsTrackerService {
         session.type3Count = currentType3Count;
         session.type4Count = currentType4Count;
 
-        // "After" LOC and complexity are the current on-disk state of the
-        // same file, if it's still findable under the project. If the
-        // file was renamed or deleted mid-session (unlikely, but
-        // possible), fall back to the "before" values so the net-change
-        // calculations read as zero rather than a misleading
-        // negative/garbage number.
+        // "After" LOC is the current on-disk state of the same file, if
+        // it's still findable under the project. If the file was renamed
+        // or deleted mid-session (unlikely, but possible), fall back to
+        // the "before" value so net-change calculations read as zero
+        // rather than a misleading negative/garbage number.
         Integer locAfter = tryReadCurrentLineCount(currentFileName);
         if (locAfter != null) {
             session.locAfter = locAfter;
         }
-        Integer complexityAfter = tryReadCurrentComplexity(currentFileName);
-        if (complexityAfter != null) {
-            session.complexityAfter = complexityAfter;
+
+        UnderstandMetricsService.UnderstandMetrics metricsAfter = tryReadCurrentUnderstandMetrics(currentFileName);
+
+        if (currentMetricsBefore != null && metricsAfter != null) {
+            session.understandAvailable = true;
+            session.complexityBefore = currentMetricsBefore.cyclomaticComplexity;
+            session.complexityAfter = metricsAfter.cyclomaticComplexity;
+            session.wmcBefore = currentMetricsBefore.weightedMethodsPerClass;
+            session.wmcAfter = metricsAfter.weightedMethodsPerClass;
+            session.cboBefore = currentMetricsBefore.couplingBetweenObjects;
+            session.cboAfter = metricsAfter.couplingBetweenObjects;
+            session.ditBefore = currentMetricsBefore.depthOfInheritance;
+            session.ditAfter = metricsAfter.depthOfInheritance;
+            session.nocBefore = currentMetricsBefore.numberOfChildren;
+            session.nocAfter = metricsAfter.numberOfChildren;
+        } else {
+            // Understand wasn't available for the before-snapshot, the
+            // after-snapshot, or both -- leave understandAvailable false
+            // and every complexity/WMC/CBO/DIT/NOC field at its default
+            // 0 rather than mixing a real before-value with a missing
+            // after-value (or vice versa), which would silently produce
+            // a wrong-looking net change.
+            session.understandAvailable = false;
         }
 
         persistSession(session);
@@ -265,17 +303,29 @@ public final class MetricsTrackerService {
         return null;
     }
 
-    private Integer tryReadCurrentComplexity(String fileName) {
+    private UnderstandMetricsService.UnderstandMetrics tryReadCurrentUnderstandMetrics(String fileName) {
         try {
             VirtualFile found = findByName(fileName);
             if (found != null) {
                 PsiFile psi = PsiManager.getInstance(project).findFile(found);
-                if (psi != null) return countCyclomaticComplexity(psi);
+                if (psi != null) return analyzeWithUnderstand(psi);
             }
         } catch (Exception e) {
-            LOG.warn("CloneGuard: could not re-read file for metrics complexity 'after' count: " + e.getMessage());
+            LOG.warn("CloneGuard: could not re-read file for Understand metrics 'after' snapshot: " + e.getMessage());
         }
         return null;
+    }
+
+    /**
+     * Wraps understandService.analyzeFile() with the PsiFile ->
+     * absolute-path lookup it needs, and treats a missing VirtualFile
+     * (e.g. an in-memory/unsaved file with no real path yet) the same
+     * as "Understand unavailable" -- returns null rather than throwing.
+     */
+    private UnderstandMetricsService.UnderstandMetrics analyzeWithUnderstand(PsiFile psiFile) {
+        VirtualFile vf = psiFile.getVirtualFile();
+        if (vf == null) return null;
+        return understandService.analyzeFile(vf.getPath());
     }
 
     /**
@@ -298,50 +348,6 @@ public final class MetricsTrackerService {
         Collection<VirtualFile> found = FilenameIndex.getVirtualFilesByName(
                 project, name, GlobalSearchScope.projectScope(project));
         return found.isEmpty() ? null : found.iterator().next();
-    }
-
-    /**
-     * Cyclomatic complexity, summed across every method in the file:
-     * 1 (base path) per method, plus one for every decision point —
-     * if, for, foreach, while, do-while, catch, ternary (?:), each
-     * non-default switch case, and each && / || (every additional
-     * operand beyond the first adds one more branch). Computed via
-     * real PSI traversal rather than a text/regex heuristic, since
-     * unlike line counting, complexity genuinely depends on real
-     * control-flow structure -- exactly the kind of thing PSI exists
-     * to provide reliably, and the same reason Scenario 2's Java-side
-     * detection is more trustworthy than Scenario 3's regex-based
-     * Python extraction elsewhere in this codebase.
-     */
-    private int countCyclomaticComplexity(PsiFile psiFile) {
-        int total = 0;
-        for (PsiMethod method : PsiTreeUtil.findChildrenOfType(psiFile, PsiMethod.class)) {
-            PsiCodeBlock body = method.getBody();
-            if (body == null) continue; // abstract/interface method — nothing to measure
-
-            total += 1; // base complexity for the method's single straight-line path
-            total += PsiTreeUtil.findChildrenOfType(body, PsiIfStatement.class).size();
-            total += PsiTreeUtil.findChildrenOfType(body, PsiForStatement.class).size();
-            total += PsiTreeUtil.findChildrenOfType(body, PsiForeachStatement.class).size();
-            total += PsiTreeUtil.findChildrenOfType(body, PsiWhileStatement.class).size();
-            total += PsiTreeUtil.findChildrenOfType(body, PsiDoWhileStatement.class).size();
-            total += PsiTreeUtil.findChildrenOfType(body, PsiCatchSection.class).size();
-            total += PsiTreeUtil.findChildrenOfType(body, PsiConditionalExpression.class).size(); // ternary
-
-            for (PsiSwitchLabelStatement label : PsiTreeUtil.findChildrenOfType(body, PsiSwitchLabelStatement.class)) {
-                if (!label.isDefaultCase()) total++;
-            }
-
-            for (PsiPolyadicExpression expr : PsiTreeUtil.findChildrenOfType(body, PsiPolyadicExpression.class)) {
-                if (expr.getOperationTokenType() == JavaTokenType.ANDAND
-                        || expr.getOperationTokenType() == JavaTokenType.OROR) {
-                    // A chain like (a && b && c) has 3 operands but only
-                    // 2 actual short-circuit decision points.
-                    total += Math.max(0, expr.getOperands().length - 1);
-                }
-            }
-        }
-        return total;
     }
 
     private int countLines(String text) {
