@@ -269,16 +269,32 @@ public class InlineSuggestionListener implements EditorFactoryListener {
         notification.addAction(new AnAction("Push Down \u2192") {
             @Override
             public void actionPerformed(@NotNull AnActionEvent e) {
-                // Same reasoning as the Pull Up/Extract/Delegate action —
-                // see the comment there for the full explanation.
-                PsiFile psiFileForMetrics = PsiManager.getInstance(project).findFile(vf);
-                if (psiFileForMetrics != null) {
-                    com.cloneguard.services.MetricsTrackerService.getInstance(project)
-                            .startSessionIfNoneActive(psiFileForMetrics);
-                }
-                ExtractMethodEngine.getInstance(project).pushDown(
-                        vf, candidate.methodName, candidate.targetSubclassName,
-                        (updatedFile) -> notification.expire());
+                // FIX: startSessionIfNoneActive() now shells out to
+                // Understand (`und`), which can take several real
+                // seconds -- calling it directly here would block the
+                // EDT for that whole duration, since actionPerformed()
+                // IS the EDT. Moved into a background task; the actual
+                // refactor call (needs the EDT for its confirm dialog)
+                // runs afterward via invokeLater.
+                com.intellij.openapi.progress.ProgressManager.getInstance().run(
+                        new com.intellij.openapi.progress.Task.Backgroundable(project, "CloneGuard: Recording session...", false) {
+                            @Override
+                            public void run(@NotNull com.intellij.openapi.progress.ProgressIndicator indicator) {
+                                indicator.setIndeterminate(true);
+                                PsiFile psiFileForMetrics = ApplicationManager.getApplication().runReadAction(
+                                        (com.intellij.openapi.util.Computable<PsiFile>) () ->
+                                                PsiManager.getInstance(project).findFile(vf));
+                                if (psiFileForMetrics != null) {
+                                    com.cloneguard.services.MetricsTrackerService.getInstance(project)
+                                            .startSessionIfNoneActive(psiFileForMetrics);
+                                }
+                                ApplicationManager.getApplication().invokeLater(() ->
+                                        ExtractMethodEngine.getInstance(project).pushDown(
+                                                vf, candidate.methodName, candidate.targetSubclassName,
+                                                (updatedFile) -> notification.expire()));
+                            }
+                        }
+                );
             }
         });
 
@@ -377,27 +393,41 @@ public class InlineSuggestionListener implements EditorFactoryListener {
                     // is safe to call unconditionally without risk of
                     // discarding an in-progress session from an earlier
                     // scan.
-                    PsiFile psiFileForMetrics = PsiManager.getInstance(project).findFile(vf);
-                    if (psiFileForMetrics != null) {
-                        com.cloneguard.services.MetricsTrackerService.getInstance(project)
-                                .startSessionIfNoneActive(psiFileForMetrics);
-                    }
-
-                    ExtractMethodEngine engine = ExtractMethodEngine.getInstance(project);
-                    if (result.cloneType == CloneType.TYPE_4) {
-                        engine.delegate(
-                                vf, canonicalName, duplicateName, cloneTypeLabel,
-                                (updatedFile) -> notification.expire());
-                    } else {
-                        boolean handledAsPullUp = engine.tryPullUpIfApplicable(
-                                vf, canonicalName, duplicateName, cloneTypeLabel,
-                                (updatedFile) -> notification.expire());
-                        if (!handledAsPullUp) {
-                            engine.extract(
-                                    vf, canonicalName, duplicateName, cloneTypeLabel,
-                                    (updatedFile) -> notification.expire());
-                        }
-                    }
+                    // FIX: same threading issue and same fix as the
+                    // Push Down notification action above -- see that
+                    // comment for the full explanation.
+                    com.intellij.openapi.progress.ProgressManager.getInstance().run(
+                            new com.intellij.openapi.progress.Task.Backgroundable(project, "CloneGuard: Recording session...", false) {
+                                @Override
+                                public void run(@NotNull com.intellij.openapi.progress.ProgressIndicator indicator) {
+                                    indicator.setIndeterminate(true);
+                                    PsiFile psiFileForMetrics = ApplicationManager.getApplication().runReadAction(
+                                            (com.intellij.openapi.util.Computable<PsiFile>) () ->
+                                                    PsiManager.getInstance(project).findFile(vf));
+                                    if (psiFileForMetrics != null) {
+                                        com.cloneguard.services.MetricsTrackerService.getInstance(project)
+                                                .startSessionIfNoneActive(psiFileForMetrics);
+                                    }
+                                    ApplicationManager.getApplication().invokeLater(() -> {
+                                        ExtractMethodEngine engine = ExtractMethodEngine.getInstance(project);
+                                        if (result.cloneType == CloneType.TYPE_4) {
+                                            engine.delegate(
+                                                    vf, canonicalName, duplicateName, cloneTypeLabel,
+                                                    (updatedFile) -> notification.expire());
+                                        } else {
+                                            boolean handledAsPullUp = engine.tryPullUpIfApplicable(
+                                                    vf, canonicalName, duplicateName, cloneTypeLabel,
+                                                    (updatedFile) -> notification.expire());
+                                            if (!handledAsPullUp) {
+                                                engine.extract(
+                                                        vf, canonicalName, duplicateName, cloneTypeLabel,
+                                                        (updatedFile) -> notification.expire());
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                    );
                 }
             });
 

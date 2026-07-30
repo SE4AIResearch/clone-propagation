@@ -33,7 +33,7 @@ public final class UnderstandMetricsService {
     private static final Logger LOG = Logger.getInstance(UnderstandMetricsService.class);
 
     public static class UnderstandMetrics {
-        public int cyclomaticComplexity;   // CC
+        public int cyclomaticComplexity;   // CC -- actually MaxCyclomatic (worst single method), since raw per-class Cyclomatic doesn't exist in Understand
         public int weightedMethodsPerClass; // WMC (SumCyclomatic)
         public int linesOfCode;            // LOC (CountLineCode)
         public int couplingBetweenObjects; // CBO (CountClassCoupled)
@@ -52,17 +52,42 @@ public final class UnderstandMetricsService {
      * attempting any real analysis. Callers should check this first and
      * show a clear message if false, rather than silently failing later.
      */
+    // FIX: GUI apps on macOS (IntelliJ included) do NOT inherit the
+    // PATH set up in a user's shell config (.zshrc, .bash_profile, etc.)
+    // -- that PATH only applies to processes launched FROM a terminal.
+    // Confirmed live: `und` worked perfectly from Terminal (added to
+    // PATH there) but the plugin still reported "Understand not
+    // available", because IntelliJ itself never saw that PATH change at
+    // all. Rather than rely on bare "und" resolving via PATH, this
+    // checks a list of known install locations directly (Understand's
+    // default macOS install path first, then falls back to a bare "und"
+    // in case it genuinely is on PATH for some other reason -- e.g. the
+    // IDE was launched from a terminal with `idea .`).
+    private static final String[] UND_CANDIDATE_PATHS = {
+            "/Applications/Understand.app/Contents/MacOS/und",
+            "und" // fallback: bare command, relies on PATH being inherited
+    };
+
+    private String resolvedUndPath;
+
     public boolean isUnderstandAvailable() {
-        try {
-            Process check = new ProcessBuilder("und", "version")
-                    .redirectErrorStream(true)
-                    .start();
-            boolean finished = check.waitFor(5, TimeUnit.SECONDS);
-            return finished && check.exitValue() == 0;
-        } catch (IOException | InterruptedException e) {
-            LOG.info("Understand (`und`) not found on PATH: " + e.getMessage());
-            return false;
+        if (resolvedUndPath != null) return true;
+        for (String candidate : UND_CANDIDATE_PATHS) {
+            try {
+                Process check = new ProcessBuilder(candidate, "version")
+                        .redirectErrorStream(true)
+                        .start();
+                boolean finished = check.waitFor(5, TimeUnit.SECONDS);
+                if (finished && check.exitValue() == 0) {
+                    resolvedUndPath = candidate;
+                    return true;
+                }
+            } catch (IOException | InterruptedException e) {
+                // Try the next candidate path.
+            }
         }
+        LOG.info("Understand (`und`) not found at any known location or on PATH.");
+        return false;
     }
 
     /**
@@ -90,8 +115,18 @@ public final class UnderstandMetricsService {
             runUnd("create", "-db", dbPath, "-languages", "java");
             runUnd("add", "-db", dbPath, absoluteFilePath);
             runUnd("analyze", "-all", "-db", dbPath);
+            // FIX (found live, this session): "Cyclomatic" is a
+            // per-METHOD-only metric in Understand -- it is legitimately
+            // BLANK on class-level rows, confirmed directly against real
+            // CSV output earlier this session (LocalCloneDetector's class
+            // row had Cyclomatic blank, SumCyclomatic=46). Reading it
+            // directly for a class-level "CC" figure silently produced 0
+            // every time, not a genuine zero-complexity result. MaxCyclomatic
+            // (the single most complex method in the class) IS a valid
+            // class-level aggregate, same as SumCyclomatic -- added here
+            // and used instead, below.
             runUnd("settings", "-db", dbPath, "-MetricsMetricsAdd",
-                    "Cyclomatic", "SumCyclomatic", "CountClassCoupled",
+                    "Cyclomatic", "MaxCyclomatic", "SumCyclomatic", "CountClassCoupled",
                     "MaxInheritanceTree", "CountClassDerived", "CountLineCode");
 
             Path csvOut = Files.createTempFile("cloneguard-und-metrics-", ".csv");
@@ -115,7 +150,7 @@ public final class UnderstandMetricsService {
 
     private void runUnd(String... args) throws IOException, InterruptedException {
         List<String> command = new ArrayList<>();
-        command.add("und");
+        command.add(resolvedUndPath != null ? resolvedUndPath : "und");
         for (String a : args) {
             command.add(a);
         }
@@ -170,7 +205,11 @@ public final class UnderstandMetricsService {
                     .equals(new File(targetFilePath).getAbsolutePath())) continue;
 
             UnderstandMetrics m = new UnderstandMetrics();
-            m.cyclomaticComplexity = parseIntSafe(safeGet(row, colIndex, "Cyclomatic"));
+            // See the FIX comment above analyzeFile()'s settings call --
+            // "Cyclomatic" is blank at class granularity; MaxCyclomatic
+            // (worst single method in the class) is what's actually
+            // populated here and is what CC now reflects.
+            m.cyclomaticComplexity = parseIntSafe(safeGet(row, colIndex, "MaxCyclomatic"));
             m.weightedMethodsPerClass = parseIntSafe(safeGet(row, colIndex, "SumCyclomatic"));
             m.linesOfCode = parseIntSafe(safeGet(row, colIndex, "CountLineCode"));
             m.couplingBetweenObjects = parseIntSafe(safeGet(row, colIndex, "CountClassCoupled"));

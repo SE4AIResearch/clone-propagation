@@ -326,7 +326,7 @@ public class ExtractMethodEngine {
         // moments earlier.
         PsiDocumentManager.getInstance(project).commitAllDocuments();
 
-        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
+        PsiFile psiFile = ReadAction.compute(() -> PsiManager.getInstance(project).findFile(targetFile));
         if (psiFile == null) {
             showDialog(
                     "Could not read the target file. Make sure it is saved.",
@@ -1033,7 +1033,7 @@ public class ExtractMethodEngine {
 
         PsiDocumentManager.getInstance(project).commitAllDocuments();
 
-        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
+        PsiFile psiFile = ReadAction.compute(() -> PsiManager.getInstance(project).findFile(targetFile));
         if (psiFile == null) {
             showDialog("Could not read the target file. Make sure it is saved.", "CloneGuard", JOptionPane.WARNING_MESSAGE);
             return;
@@ -1549,7 +1549,7 @@ public class ExtractMethodEngine {
         if (targetFile == null || !targetFile.isValid()) return false;
 
         PsiDocumentManager.getInstance(project).commitAllDocuments();
-        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
+        PsiFile psiFile = ReadAction.compute(() -> PsiManager.getInstance(project).findFile(targetFile));
         if (psiFile == null) return false;
 
         final String canonicalName = canonical;
@@ -1605,7 +1605,7 @@ public class ExtractMethodEngine {
 
         PsiDocumentManager.getInstance(project).commitAllDocuments();
 
-        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
+        PsiFile psiFile = ReadAction.compute(() -> PsiManager.getInstance(project).findFile(targetFile));
         if (psiFile == null) {
             showDialog("Could not read the target file. Make sure it is saved.", "CloneGuard", JOptionPane.WARNING_MESSAGE);
             return;
@@ -1953,7 +1953,7 @@ public class ExtractMethodEngine {
 
         PsiDocumentManager.getInstance(project).commitAllDocuments();
 
-        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
+        PsiFile psiFile = ReadAction.compute(() -> PsiManager.getInstance(project).findFile(targetFile));
         if (psiFile == null) {
             showDialog("Could not read the target file. Make sure it is saved.", "CloneGuard", JOptionPane.WARNING_MESSAGE);
             return;

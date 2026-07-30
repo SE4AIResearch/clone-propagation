@@ -2,8 +2,12 @@ package com.cloneguard.services;
 
 import com.cloneguard.model.RefactorSession;
 import com.google.gson.Gson;
+import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.application.ReadAction;
 import com.intellij.openapi.components.Service;
 import com.intellij.openapi.diagnostic.Logger;
+import com.intellij.openapi.editor.Document;
+import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.*;
@@ -276,6 +280,8 @@ public final class MetricsTrackerService {
             session.ditAfter = metricsAfter.depthOfInheritance;
             session.nocBefore = currentMetricsBefore.numberOfChildren;
             session.nocAfter = metricsAfter.numberOfChildren;
+            session.locUnderstandBefore = currentMetricsBefore.linesOfCode;
+            session.locUnderstandAfter = metricsAfter.linesOfCode;
         } else {
             // Understand wasn't available for the before-snapshot, the
             // after-snapshot, or both -- leave understandAvailable false
@@ -292,11 +298,17 @@ public final class MetricsTrackerService {
 
     private Integer tryReadCurrentLineCount(String fileName) {
         try {
-            VirtualFile found = findByName(fileName);
-            if (found != null) {
+            // Same fix as findByName() -- PsiManager.findFile() and
+            // psi.getText() are both PSI reads needing an explicit
+            // ReadAction now that this runs on a background thread. This
+            // whole method is fast (no external process involved), so
+            // wrapping it all in one ReadAction is safe and simplest.
+            return ReadAction.compute(() -> {
+                VirtualFile found = findByName(fileName);
+                if (found == null) return null;
                 PsiFile psi = PsiManager.getInstance(project).findFile(found);
-                if (psi != null) return countLines(psi.getText());
-            }
+                return (psi != null) ? countLines(psi.getText()) : null;
+            });
         } catch (Exception e) {
             LOG.warn("CloneGuard: could not re-read file for metrics 'after' count: " + e.getMessage());
         }
@@ -305,11 +317,46 @@ public final class MetricsTrackerService {
 
     private UnderstandMetricsService.UnderstandMetrics tryReadCurrentUnderstandMetrics(String fileName) {
         try {
-            VirtualFile found = findByName(fileName);
-            if (found != null) {
-                PsiFile psi = PsiManager.getInstance(project).findFile(found);
-                if (psi != null) return analyzeWithUnderstand(psi);
+            // IMPORTANT: only the PSI/index lookup (finding the file,
+            // confirming it's still resolvable) happens inside
+            // ReadAction here -- the actual understandService.analyzeFile()
+            // call below runs OUTSIDE it, deliberately. That call shells
+            // out to `und` and can take several real seconds; holding a
+            // read lock for that entire duration would block every other
+            // read/write action in the IDE for as long as Understand is
+            // running, which is a far worse problem than the one this is
+            // fixing.
+            //
+            // FIX (found live, this session): confirmed via direct CSV
+            // comparison -- the "after" WMC the dashboard showed (4)
+            // exactly matched the PRE-refactor file's total (findMinimum
+            // CC=3 + main CC=1), not the real post-refactor total (6,
+            // confirmed by running `und` directly against the saved
+            // file). WriteCommandAction updates the in-memory Document
+            // immediately, but `und` is an external process that reads
+            // the file straight from DISK -- if IntelliJ hadn't yet
+            // flushed that document to disk by the time this ran,
+            // Understand silently analyzed the stale pre-refactor bytes.
+            // Explicitly saving the document first guarantees `und` sees
+            // the real, current content.
+            VirtualFile foundForSave = ReadAction.compute(() -> findByName(fileName));
+            if (foundForSave != null) {
+                ApplicationManager.getApplication().invokeAndWait(() -> {
+                    Document doc = FileDocumentManager.getInstance().getDocument(foundForSave);
+                    if (doc != null) {
+                        FileDocumentManager.getInstance().saveDocument(doc);
+                    }
+                });
             }
+
+            String filePath = ReadAction.compute(() -> {
+                VirtualFile found = findByName(fileName);
+                if (found == null) return null;
+                PsiFile psi = PsiManager.getInstance(project).findFile(found);
+                return (psi != null) ? found.getPath() : null;
+            });
+            if (filePath == null) return null;
+            return understandService.analyzeFile(filePath);
         } catch (Exception e) {
             LOG.warn("CloneGuard: could not re-read file for Understand metrics 'after' snapshot: " + e.getMessage());
         }
@@ -323,9 +370,15 @@ public final class MetricsTrackerService {
      * as "Understand unavailable" -- returns null rather than throwing.
      */
     private UnderstandMetricsService.UnderstandMetrics analyzeWithUnderstand(PsiFile psiFile) {
-        VirtualFile vf = psiFile.getVirtualFile();
-        if (vf == null) return null;
-        return understandService.analyzeFile(vf.getPath());
+        // Same principle as tryReadCurrentUnderstandMetrics above: only
+        // the PSI read (getVirtualFile()) is wrapped in ReadAction; the
+        // slow understandService.analyzeFile() call stays outside it.
+        String filePath = ReadAction.compute(() -> {
+            VirtualFile vf = psiFile.isValid() ? psiFile.getVirtualFile() : null;
+            return (vf != null) ? vf.getPath() : null;
+        });
+        if (filePath == null) return null;
+        return understandService.analyzeFile(filePath);
     }
 
     /**
@@ -344,10 +397,20 @@ public final class MetricsTrackerService {
      * excluded from indexing (build output, VCS metadata, etc.), which
      * the old manual walk had no way to skip at all.
      */
+    // FIX: found live -- FilenameIndex.getVirtualFilesByName() touches
+    // IntelliJ's project index, which requires an explicit ReadAction on
+    // ANY thread that doesn't already hold one. This used to be called
+    // from startSession(), which ran directly on the EDT (implicit read
+    // access historically tolerated there in many platform versions) --
+    // now that startSession() correctly runs on a background thread (see
+    // ScanFileAction's Task.Backgroundable), this same call has ZERO
+    // implicit read access and throws without an explicit wrap.
     private VirtualFile findByName(String name) {
-        Collection<VirtualFile> found = FilenameIndex.getVirtualFilesByName(
-                project, name, GlobalSearchScope.projectScope(project));
-        return found.isEmpty() ? null : found.iterator().next();
+        return ReadAction.compute(() -> {
+            Collection<VirtualFile> found = FilenameIndex.getVirtualFilesByName(
+                    project, name, GlobalSearchScope.projectScope(project));
+            return found.isEmpty() ? null : found.iterator().next();
+        });
     }
 
     private int countLines(String text) {

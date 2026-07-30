@@ -65,6 +65,15 @@ public class RefactorSession {
     public int nocBefore;
     public int nocAfter;
 
+    // NEW: LOC as counted by Understand itself (CountLineCode), kept
+    // separate from the plugin's own locBefore/locAfter above -- those
+    // come from a simple in-house line count and aren't guaranteed to
+    // match Understand's own counting rules exactly (e.g. around blank
+    // lines/braces), so this is the genuinely Understand-sourced figure,
+    // grouped alongside CC/WMC/CBO/DIT/NOC on the dashboard.
+    public int locUnderstandBefore;
+    public int locUnderstandAfter;
+
     // NEW: true only if Understand was actually reachable and returned
     // real data for BOTH the "before" and "after" snapshot of this
     // session. If false, every *Before/*After field above other than

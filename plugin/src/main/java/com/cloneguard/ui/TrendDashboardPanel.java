@@ -48,6 +48,7 @@ public class TrendDashboardPanel {
     private final JPanel cloneTypeBreakdownContainer;
     private final JPanel understandMetricsContainer;
     private final JLabel understandStatusLabel;
+    private final JLabel understandLegendLabel;
     private final JPanel centerPanel;
 
     // Which file's trend is currently being shown — set by
@@ -148,6 +149,19 @@ public class TrendDashboardPanel {
         understandMetricsContainer.setAlignmentX(Component.LEFT_ALIGNMENT);
         understandMetricsContainer.setOpaque(false);
         centerPanel.add(understandMetricsContainer);
+
+        // NEW: always-visible legend spelling out each metric's full name
+        // and a one-line explanation -- the chips above stay short (CC,
+        // WMC, LOC...) so the row itself stays compact and readable, but
+        // the full meaning is always visible here rather than hidden
+        // behind a hover tooltip a first-time viewer might never
+        // discover.
+        understandLegendLabel = new JLabel(understandLegendHtml());
+        understandLegendLabel.setFont(understandLegendLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        understandLegendLabel.setForeground(JBColor.GRAY);
+        understandLegendLabel.setBorder(new EmptyBorder(6, 0, 0, 0));
+        understandLegendLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        centerPanel.add(understandLegendLabel);
 
         JBScrollPane scroll = new JBScrollPane(centerPanel);
         scroll.setBorder(null);
@@ -318,11 +332,19 @@ public class TrendDashboardPanel {
         understandMetricsContainer.removeAll();
         if (latest.understandAvailable) {
             understandStatusLabel.setText(" ");
-            understandMetricsContainer.add(breakdownChip("CC " + latest.complexityAfter, 0, new Color(99, 90, 197)));
-            understandMetricsContainer.add(understandChip("WMC", latest.wmcAfter, new Color(46, 139, 87)));
-            understandMetricsContainer.add(understandChip("CBO", latest.cboAfter, new Color(197, 90, 17)));
-            understandMetricsContainer.add(understandChip("DIT", latest.ditAfter, new Color(184, 134, 11)));
-            understandMetricsContainer.add(understandChip("NOC", latest.nocAfter, new Color(90, 143, 214)));
+            // Each chip below gets a short one-line tooltip explaining
+            // what the metric means -- hover to see it, since six
+            // acronyms in a row means nothing to a first-time viewer.
+            understandMetricsContainer.add(understandChip("CC", latest.complexityAfter, new Color(99, 90, 197),
+                    "Cyclomatic Complexity (worst method in the class): number of independent decision paths through it."));
+            understandMetricsContainer.add(understandChip("WMC", latest.wmcAfter, new Color(46, 139, 87),
+                    "Weighted Methods per Class: sum of every method's complexity in the class."));
+            understandMetricsContainer.add(understandChip("CBO", latest.cboAfter, new Color(197, 90, 17),
+                    "Coupling Between Objects: how many other classes this class references."));
+            understandMetricsContainer.add(understandChip("DIT", latest.ditAfter, new Color(184, 134, 11),
+                    "Depth of Inheritance Tree: how many levels up the class hierarchy this class sits."));
+            understandMetricsContainer.add(understandChip("NOC", latest.nocAfter, new Color(90, 143, 214),
+                    "Number of Children: how many other classes directly extend this class."));
         } else {
             understandStatusLabel.setText(
                     "Understand not available for the most recent session — install and license SciTools Understand, "
@@ -349,10 +371,26 @@ public class TrendDashboardPanel {
     }
 
     /** Same visual style as breakdownChip, but always shows "Label: value" -- used for the Understand metrics row, where 0 is a genuine, meaningful value (not "nothing happened yet"). */
-    private JLabel understandChip(String label, int value, Color color) {
+    /**
+     * Small always-visible reference block: full name + one-line meaning
+     * for each of the six Understand-derived metrics, in the same order
+     * the chips above appear (CC, WMC, LOC, CBO, DIT, NOC).
+     */
+    private static String understandLegendHtml() {
+        return "<html>"
+                + "<b>CC</b> = Cyclomatic Complexity (worst method in the class): number of independent decision paths through it.<br>"
+                + "<b>WMC</b> = Weighted Methods per Class: sum of every method's complexity in the class.<br>"
+                + "<b>CBO</b> = Coupling Between Objects: how many other classes this class references.<br>"
+                + "<b>DIT</b> = Depth of Inheritance Tree: how many levels up the class hierarchy this class sits.<br>"
+                + "<b>NOC</b> = Number of Children: how many other classes directly extend this class."
+                + "</html>";
+    }
+
+    private JLabel understandChip(String label, int value, Color color, String tooltip) {
         JLabel chip = new JLabel("\u25CF " + label + ": " + value);
         chip.setForeground(color);
         chip.setFont(chip.getFont().deriveFont(Font.PLAIN, 12f));
+        chip.setToolTipText(tooltip);
         return chip;
     }
 
