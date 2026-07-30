@@ -609,3 +609,101 @@ footer {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+
+/* ============================================================
+   Liveliness pass 2: cursor-tracked glow, staggered hero
+   entrance on load, 3D-tilt card hover, button fill-sweep,
+   smoother scroll reveals with blur-to-focus.
+   ============================================================ */
+
+.cursor-glow {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 500px;
+  height: 500px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(30, 143, 91, 0.08) 0%, rgba(30, 143, 91, 0) 70%);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  z-index: 0;
+  transition: opacity 0.3s ease;
+  opacity: 0;
+}
+.cursor-glow.active { opacity: 1; }
+@media (max-width: 860px) {
+  .cursor-glow { display: none; }
+}
+
+/* Hero entrance sequence on load */
+.hero-eyebrow, .hero h1, .hero-sub, .hero-actions, .diff-demo, .stat-strip {
+  opacity: 0;
+  transform: translateY(18px);
+}
+.enter-ready .hero-eyebrow {
+  animation: enterUp 0.7s cubic-bezier(0.2, 0.75, 0.3, 1) 0.05s forwards;
+}
+.enter-ready .hero h1 {
+  animation: enterUp 0.8s cubic-bezier(0.2, 0.75, 0.3, 1) 0.15s forwards;
+}
+.enter-ready .hero-sub {
+  animation: enterUp 0.8s cubic-bezier(0.2, 0.75, 0.3, 1) 0.28s forwards;
+}
+.enter-ready .hero-actions {
+  animation: enterUp 0.8s cubic-bezier(0.2, 0.75, 0.3, 1) 0.4s forwards;
+}
+.enter-ready .diff-demo {
+  animation: enterUp 0.9s cubic-bezier(0.2, 0.75, 0.3, 1) 0.52s forwards;
+}
+.enter-ready .stat-strip {
+  animation: enterUp 0.8s cubic-bezier(0.2, 0.75, 0.3, 1) 0.68s forwards;
+}
+@keyframes enterUp {
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Blur-to-focus scroll reveal, replacing the flatter fade-up */
+.reveal {
+  filter: blur(4px);
+  transition: opacity 0.7s cubic-bezier(0.2, 0.65, 0.3, 0.95),
+              transform 0.7s cubic-bezier(0.2, 0.65, 0.3, 0.95),
+              filter 0.7s cubic-bezier(0.2, 0.65, 0.3, 0.95);
+}
+.reveal.in {
+  filter: blur(0);
+}
+
+/* 3D-tilt card hover */
+.card, .team-card {
+  transform-style: preserve-3d;
+  perspective: 800px;
+  will-change: transform;
+}
+
+/* Button fill-sweep */
+.btn {
+  position: relative;
+  overflow: hidden;
+  z-index: 0;
+}
+.btn::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.18);
+  transform: translateX(-100%);
+  transition: transform 0.4s ease;
+  z-index: -1;
+}
+.btn:hover::before {
+  transform: translateX(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-eyebrow, .hero h1, .hero-sub, .hero-actions, .diff-demo, .stat-strip {
+    opacity: 1 !important;
+    transform: none !important;
+    animation: none !important;
+  }
+  .cursor-glow { display: none; }
+}
