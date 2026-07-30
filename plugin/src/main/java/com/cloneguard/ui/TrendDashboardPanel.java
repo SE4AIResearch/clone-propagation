@@ -341,20 +341,20 @@ public class TrendDashboardPanel {
                 xs[i] = (n == 1) ? padLeft + chartW / 2 : padLeft + (chartW * i / (n - 1));
             }
 
-            // FIX (found live, requested change): the previous two-line
-            // rendering (dashed grey for "before", solid green for
-            // "after", with small dot markers) asked the viewer to
-            // mentally connect two separate lines to see what changed in
-            // any one session -- easy to miss at a glance, especially
-            // with several sessions close together. A box per session,
-            // spanning directly from its "before" value to its "after"
-            // value, shows the same information as one shape instead of
-            // two lines: taller box = bigger change, box color = whether
-            // that change was an improvement or not, no mental
-            // reconstruction required.
-            int boxWidth = Math.max(6, Math.min(28, chartW / Math.max(1, n) / 2));
+            // FIX (found live, requested change v2): the box-per-session
+            // approach (spanning a range from "before" to "after") tested
+            // worse in practice than expected -- reverting to a more
+            // conventional grouped-bar histogram instead: each session
+            // gets two adjacent bars, one for "before" and one for
+            // "after", both starting from the same zero baseline like a
+            // standard bar chart, rather than floating boxes representing
+            // a range. This is a more familiar chart shape to read at a
+            // glance, and makes it obvious this is a per-session
+            // comparison rather than a continuous trend line.
+            int groupWidth = Math.max(10, Math.min(36, chartW / Math.max(1, n) - 4));
+            int barWidth = Math.max(3, groupWidth / 2 - 1);
             for (int i = 0; i < n; i++) {
-                drawSessionBox(g2, sessions.get(i), xs[i], boxWidth, padTop, chartH, maxLoc);
+                drawSessionBars(g2, sessions.get(i), xs[i], barWidth, padTop, chartH, maxLoc);
             }
 
             g2.setColor(JBColor.GRAY);
@@ -367,39 +367,37 @@ public class TrendDashboardPanel {
         }
 
         /**
-         * Draws one session as a box spanning from its "before" LOC value
-         * to its "after" value. Green fill means the file got smaller
-         * (improved); orange fill means it grew. A thin horizontal tick
-         * marks the exact "after" value inside the box, since that's the
-         * number that matters most once the session is done.
+         * Draws one session as two adjacent bars, both rising from the
+         * chart's zero baseline: a grey bar for "before" LOC and a
+         * colored bar for "after" LOC. Green after-bar means the file got
+         * smaller (improved); orange means it grew. Two side-by-side bars
+         * per session, in the style of a standard grouped-bar histogram,
+         * rather than a single floating shape.
          */
-        private void drawSessionBox(Graphics2D g2, RefactorSession s, int x, int boxWidth,
-                                     int padTop, int chartH, int maxLoc) {
-            int yBefore = padTop + chartH - (int) ((long) chartH * s.locBefore / maxLoc);
-            int yAfter = padTop + chartH - (int) ((long) chartH * s.locAfter / maxLoc);
-
-            int top = Math.min(yBefore, yAfter);
-            int bottom = Math.max(yBefore, yAfter);
-            int boxHeight = Math.max(3, bottom - top); // minimum height so a near-zero change still reads as a visible box
+        private void drawSessionBars(Graphics2D g2, RefactorSession s, int x, int barWidth,
+                                      int padTop, int chartH, int maxLoc) {
+            int baseline = padTop + chartH;
+            int beforeHeight = (int) ((long) chartH * s.locBefore / maxLoc);
+            int afterHeight = (int) ((long) chartH * s.locAfter / maxLoc);
 
             boolean improved = s.locAfter <= s.locBefore;
-            Color fill = improved
-                    ? new JBColor(new Color(46, 160, 90, 160), new Color(90, 200, 130, 160))
-                    : new JBColor(new Color(214, 100, 40, 160), new Color(230, 140, 80, 160));
-            Color edge = improved
+            Color afterFill = improved
                     ? new JBColor(new Color(46, 160, 90), new Color(90, 200, 130))
                     : new JBColor(new Color(214, 100, 40), new Color(230, 140, 80));
 
-            g2.setColor(fill);
-            g2.fillRect(x - boxWidth / 2, top, boxWidth, boxHeight);
-            g2.setColor(edge);
-            g2.setStroke(new BasicStroke(1.5f));
-            g2.drawRect(x - boxWidth / 2, top, boxWidth, boxHeight);
+            int beforeX = x - barWidth - 1;
+            int afterX = x + 1;
 
-            // tick line at the exact "after" value, so the precise end
-            // state is still readable even though the box itself only
-            // shows a range
-            g2.drawLine(x - boxWidth / 2, yAfter, x + boxWidth / 2, yAfter);
+            g2.setColor(JBColor.GRAY);
+            g2.fillRect(beforeX, baseline - beforeHeight, barWidth, beforeHeight);
+
+            g2.setColor(afterFill);
+            g2.fillRect(afterX, baseline - afterHeight, barWidth, afterHeight);
+
+            g2.setColor(JBColor.GRAY.darker());
+            g2.setStroke(new BasicStroke(1f));
+            g2.drawRect(beforeX, baseline - beforeHeight, barWidth, beforeHeight);
+            g2.drawRect(afterX, baseline - afterHeight, barWidth, afterHeight);
         }
     }
 }
