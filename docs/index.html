@@ -39,7 +39,7 @@
 
     <div class="diff-demo" id="diffDemo">
       <div class="diff-titlebar">
-        <span class="tdot" style="background:#8B4049"></span>
+        <span class="tdot" style="background:#B5473F"></span>
         <span class="tdot" style="background:#E0B84C"></span>
         <span class="tdot" style="background:var(--signal)"></span>
         &nbsp;GcdDemo.java
@@ -64,30 +64,30 @@
 
 <section id="scenarios">
   <div class="wrap">
-    <div class="section-eyebrow">Three entry points</div>
-    <h2 class="section-title">Detection meets you where the code is written.</h2>
-    <p class="section-lead">
+    <div class="section-eyebrow reveal">Three entry points</div>
+    <h2 class="section-title reveal">Detection meets you where the code is written.</h2>
+    <p class="section-lead reveal">
       Existing clone-detection tools operate as a batch scan over a codebase
       that already exists. CloneGuard is built around closing that timing
       gap specifically.
     </p>
 
     <div class="grid-3">
-      <div class="card">
+      <div class="card reveal">
         <div class="card-num">01 — Real-Time Paste</div>
         <h3>Catches it as you type</h3>
         <p>A warning appears the moment a pasted method matches something
         already in the file which is exact, renamed, near-miss, or semantically
         equivalent. View the original, refactor immediately, or dismiss it.</p>
       </div>
-      <div class="card">
+      <div class="card reveal d1">
         <div class="card-num">02 — File Scan</div>
         <h3>Check a whole file at once</h3>
         <p>Tools → CloneGuard → Scan Current File compares every method
         against every other, surfacing results with a recommended fix and
         tracking each session on the Trend Dashboard.</p>
       </div>
-      <div class="card">
+      <div class="card reveal d2">
         <div class="card-num">03 — GitHub PR Agent</div>
         <h3>Reviews every Pull Request</h3>
         <p>A GitHub Action scans every changed Java file automatically,
@@ -100,16 +100,16 @@
 
 <section id="techniques">
   <div class="wrap">
-    <div class="section-eyebrow">Automated Refactoring</div>
-    <h2 class="section-title">A confirmed clone doesn't stop at a warning.</h2>
-    <p class="section-lead">
+    <div class="section-eyebrow reveal">Automated Refactoring</div>
+    <h2 class="section-title reveal">A confirmed clone doesn't stop at a warning.</h2>
+    <p class="section-lead reveal">
       Four techniques, chosen automatically based on where the duplicate
       actually lives and a safety check that independently re-verifies
       a fix immediately before applying it, rather than trusting detection
       blindly.
     </p>
 
-    <div style="margin-top:32px">
+    <div class="reveal" style="margin-top:32px">
       <div class="tech-row">
         <div class="tech-name">Extract Method</div>
         <div class="tech-desc">Type 1–3 clones within the same class with shared logic moves into one method both callers use.</div>
@@ -136,10 +136,8 @@
   </div>
 </footer>
 
+<script src="reveal.js"></script>
 <script>
-  // Signature moment: the duplicate method resolves into a delegate call,
-  // mirroring exactly what the plugin does. Runs once on load, respects
-  // prefers-reduced-motion via the CSS media query disabling transitions.
   window.addEventListener('load', () => {
     setTimeout(() => {
       ['dupeLine1','dupeLine2','dupeLine3','dupeLine4'].forEach(id => {

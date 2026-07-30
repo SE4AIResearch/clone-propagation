@@ -1,27 +1,34 @@
 /* ============================================================
-   CloneGuard — shared stylesheet
-   Design: diff-editor identity. Ink-navy background, single
-   mint "resolved" accent, monospace headlines paired with a
-   humanist sans body face.
+   CloneGuard — shared stylesheet (light mode)
+   Design: diff-editor identity, rebuilt bright. White page
+   background, white cards lifted with soft shadow instead of
+   borders, a single confident green accent, monospace
+   headlines paired with a humanist sans body face. Scroll-
+   triggered reveals throughout for a livelier feel.
    ============================================================ */
 
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
 
 :root {
-  --ink: #12151C;
-  --panel: #1B1F29;
-  --panel-hi: #232839;
-  --paper: #E8E4D9;
-  --signal: #6FCF97;
-  --signal-dim: #4C8B6D;
-  --dupe: #8B4049;
-  --dim: #565B6B;
-  --line: #2A2F3D;
+  --paper: #FAFAF8;
+  --panel: #FFFFFF;
+  --panel-hi: #F3F4F1;
+  --ink: #171A21;
+  --ink-soft: #40434C;
+  --signal: #1E8F5B;
+  --signal-light: #E4F4EC;
+  --dupe: #B5473F;
+  --dupe-light: #FBEAE8;
+  --dim: #71757F;
+  --line: #E7E7E3;
 
   --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Consolas, monospace;
   --sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
 
   --maxw: 1080px;
+  --shadow-sm: 0 1px 2px rgba(23, 26, 33, 0.04), 0 1px 6px rgba(23, 26, 33, 0.03);
+  --shadow-md: 0 4px 16px rgba(23, 26, 33, 0.06), 0 1px 4px rgba(23, 26, 33, 0.04);
+  --shadow-lg: 0 12px 32px rgba(23, 26, 33, 0.10), 0 2px 8px rgba(23, 26, 33, 0.05);
 }
 
 * { box-sizing: border-box; }
@@ -32,8 +39,8 @@ html {
 
 body {
   margin: 0;
-  background: var(--ink);
-  color: var(--paper);
+  background: var(--paper);
+  color: var(--ink-soft);
   font-family: var(--sans);
   font-size: 16px;
   line-height: 1.6;
@@ -57,7 +64,7 @@ h1, h2, h3 {
   font-weight: 700;
   letter-spacing: -0.01em;
   margin: 0 0 0.5em 0;
-  color: var(--paper);
+  color: var(--ink);
 }
 
 p { margin: 0 0 1em 0; }
@@ -68,13 +75,29 @@ p { margin: 0 0 1em 0; }
   padding: 0 24px;
 }
 
+/* ---------- Scroll reveal ---------- */
+.reveal {
+  opacity: 0;
+  transform: translateY(22px);
+  transition: opacity 0.7s cubic-bezier(0.2, 0.65, 0.3, 0.95),
+              transform 0.7s cubic-bezier(0.2, 0.65, 0.3, 0.95);
+}
+.reveal.in {
+  opacity: 1;
+  transform: translateY(0);
+}
+.reveal.d1 { transition-delay: 0.08s; }
+.reveal.d2 { transition-delay: 0.16s; }
+.reveal.d3 { transition-delay: 0.24s; }
+.reveal.d4 { transition-delay: 0.32s; }
+
 /* ---------- Nav ---------- */
 .nav {
   position: sticky;
   top: 0;
   z-index: 50;
-  background: rgba(18, 21, 28, 0.92);
-  backdrop-filter: blur(8px);
+  background: rgba(250, 250, 248, 0.88);
+  backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--line);
 }
 .nav-inner {
@@ -89,7 +112,7 @@ p { margin: 0 0 1em 0; }
   font-family: var(--mono);
   font-weight: 700;
   font-size: 15px;
-  color: var(--paper);
+  color: var(--ink);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -154,38 +177,44 @@ p { margin: 0 0 1em 0; }
   font-size: 14px;
   font-weight: 600;
   padding: 12px 20px;
-  border-radius: 4px;
+  border-radius: 6px;
   border: 1px solid var(--line);
   cursor: pointer;
   display: inline-block;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 .btn-primary {
   background: var(--signal);
-  color: var(--ink);
+  color: #fff;
   border-color: var(--signal);
+  box-shadow: var(--shadow-sm);
 }
 .btn-primary:hover {
-  background: #85e0ab;
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
   text-decoration: none;
 }
 .btn-ghost {
-  background: transparent;
-  color: var(--paper);
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: var(--shadow-sm);
 }
 .btn-ghost:hover {
   border-color: var(--signal);
   color: var(--signal);
   text-decoration: none;
+  transform: translateY(-1px);
 }
 
 /* ---------- Diff signature element ---------- */
 .diff-demo {
   margin-top: 56px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 10px;
   overflow: hidden;
   background: var(--panel);
   max-width: 620px;
+  box-shadow: var(--shadow-lg);
 }
 .diff-titlebar {
   display: flex;
@@ -206,11 +235,12 @@ p { margin: 0 0 1em 0; }
   padding: 18px 20px;
   white-space: pre;
   overflow-x: auto;
+  color: var(--ink-soft);
 }
 .line { display: block; }
 .ln-num { color: var(--dim); display: inline-block; width: 24px; user-select: none; }
 .line-dupe {
-  background: rgba(139, 64, 73, 0.18);
+  background: var(--dupe-light);
   transition: opacity 1.2s ease, height 1.2s ease;
 }
 .line-dupe.resolved {
@@ -220,7 +250,7 @@ p { margin: 0 0 1em 0; }
   display: block;
 }
 .line-fix {
-  background: rgba(111, 207, 151, 0.14);
+  background: var(--signal-light);
   opacity: 0;
   height: 0;
   overflow: hidden;
@@ -237,8 +267,8 @@ p { margin: 0 0 1em 0; }
   border-radius: 3px;
   margin-left: 8px;
 }
-.tag-dupe { background: rgba(139, 64, 73, 0.3); color: #e0a3ab; }
-.tag-fix { background: rgba(111, 207, 151, 0.25); color: var(--signal); }
+.tag-dupe { background: #F2CFCB; color: #8C332B; }
+.tag-fix { background: #C7E9D6; color: var(--signal); }
 
 /* ---------- Sections ---------- */
 section {
@@ -277,8 +307,14 @@ section {
 .card {
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 24px;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+.card:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-md);
 }
 .card-num {
   font-family: var(--mono);
@@ -308,7 +344,7 @@ section {
 .tech-name {
   font-family: var(--mono);
   font-weight: 600;
-  color: var(--paper);
+  color: var(--ink);
   min-width: 220px;
   flex-shrink: 0;
 }
@@ -327,8 +363,14 @@ section {
 .team-card {
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 28px;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+.team-card:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-md);
 }
 .team-role {
   font-family: var(--mono);
@@ -379,14 +421,14 @@ section {
   white-space: nowrap;
   flex-shrink: 0;
 }
-.status-ready { background: rgba(111, 207, 151, 0.15); color: var(--signal); }
-.status-pending { background: rgba(139, 64, 73, 0.15); color: #e0a3ab; }
+.status-ready { background: var(--signal-light); color: var(--signal); }
+.status-pending { background: var(--dupe-light); color: #8C332B; }
 
 /* ---------- Media placeholders ---------- */
 .media-placeholder {
   background: var(--panel);
   border: 1px dashed var(--line);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 48px 24px;
   text-align: center;
   margin-top: 20px;
@@ -411,6 +453,14 @@ section {
 @media (max-width: 720px) {
   .screenshot-grid { grid-template-columns: 1fr; }
 }
+.screenshot-grid img {
+  transition: transform 0.4s ease, box-shadow 0.4s ease;
+  box-shadow: var(--shadow-sm);
+}
+.screenshot-grid img:hover {
+  transform: scale(1.015);
+  box-shadow: var(--shadow-lg);
+}
 
 /* ---------- Footer ---------- */
 footer {
@@ -424,4 +474,5 @@ footer {
 /* ---------- Reduced motion ---------- */
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
+  .reveal { opacity: 1 !important; transform: none !important; }
 }
