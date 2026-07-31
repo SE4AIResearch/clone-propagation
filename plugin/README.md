@@ -1,162 +1,344 @@
-# CloneGuard — IntelliJ IDEA Plugin
+# CloneGuard
 
-Detects all 4 types of code clones from JetBrains AI inline suggestions
-**BEFORE** the developer accepts them (before Tab is pressed).
-
----
-
-## Project Structure
-
-```
-CloneGuard-IntelliJ/
-├── build.gradle                          ← Gradle build (IntelliJ Plugin SDK)
-├── settings.gradle
-├── gradle.properties
-└── src/main/
-    ├── java/com/cloneguard/
-    │   ├── model/
-    │   │   ├── CloneType.java            ← Enum: TYPE_1 … TYPE_4
-    │   │   ├── CloneResult.java          ← Detection result
-    │   │   └── CloneGroup.java           ← Group of clones (Scenario 2)
-    │   ├── detection/
-    │   │   └── LocalCloneDetector.java   ← Layer 1: Karp-Rabin + normalization
-    │   ├── services/
-    │   │   ├── CloneIndexService.java    ← Manages index + runs pipeline
-    │   │   ├── FileScannerService.java   ← Scenario 2: full file scan
-    │   │   └── PythonServerClient.java   ← Layer 2: HTTP → localhost:8765
-    │   ├── listeners/
-    │   │   └── InlineSuggestionListener.java  ← CORE: intercepts ghost text
-    │   └── ui/
-    │       ├── CloneWarningDialog.java          ← Warning popup (Scenario 1)
-    │       ├── CloneGuardToolWindowFactory.java ← Results panel (Scenario 2)
-    │       ├── ScanFileAction.java              ← Tools menu action
-    │       └── IndexFileAction.java             ← Manual index action
-    └── resources/META-INF/
-        └── plugin.xml                    ← Plugin registration
-```
+CloneGuard is an IntelliJ IDEA plugin, paired with a hosted detection
+server, that catches code clones the moment they're introduced — pasted,
+typed, or accepted from an AI suggestion — and offers a safe, automated
+refactor for each. It also tracks real, tool-verified code-quality metrics
+as those refactors are applied over time.
 
 ---
 
-## Prerequisites
+## Quick Start (for using the plugin)
 
-1. **IntelliJ IDEA** (Community or Ultimate) — 2023.x or 2024.x
-2. **Java 17+** — IntelliJ's bundled JDK works fine
-3. **Gradle** — bundled with IntelliJ
-4. **Python server** running at localhost:8765 (for Type 3 & 4)
+This is genuinely the whole thing. The plugin talks to a persistently
+hosted detection server by default — no local Python, no server setup, no
+API key to configure.
+
+1. Get the plugin `.zip` (GitHub release, or built from source — see
+   [Building from source](#building-from-source) below)
+2. IntelliJ IDEA → **Settings/Preferences → Plugins → gear icon (⚙) →
+   Install Plugin from Disk**
+3. Select the `.zip`, then **restart IntelliJ** when prompted
+4. Start using it:
+   - Paste code into a Java file — CloneGuard checks it automatically
+   - Or **Tools → CloneGuard → Scan Current File** to check a whole file at once
+
+Nothing else is required. **IntelliJ IDEA Ultimate is required** (Community
+edition doesn't expose the plugin APIs CloneGuard depends on).
+
+**One thing worth knowing:** the very first request after a period of
+inactivity can take a little longer than usual, while the hosted server
+spins back up — that's expected, not a bug.
 
 ---
 
-## Setup Steps
+## What it actually does
 
-### Step 1 — Copy the project to your Mac
+### 1. Paste / inline-suggestion interception
+The moment you paste or accept a sufficiently large chunk of Java code,
+CloneGuard checks it against every method already in the file. If it's a
+clone, a warning dialog appears with three options — dismiss it, accept it
+anyway, or jump to the existing method it duplicates. If you keep the
+duplicate, a persistent notification stays with a one-click refactor
+action, so you're never forced to decide in the moment.
+
+### 2. Full-file scan
+**Tools → CloneGuard → Scan Current File** runs a complete pass over the
+open file, surfacing every clone group and every method that's a candidate
+for being pushed down out of an overly broad superclass. Results appear in
+a dedicated tool window with a **Refactor →** button per group.
+
+### 3. AI-generated code detection
+Separately from clone detection, CloneGuard can flag whether a given block
+of code looks AI-generated, via the server's `/detect-ai` endpoint.
+
+### 4. Trend Dashboard
+A second tab in the same tool window shows, per file, how quality has
+actually changed across every refactor you've applied — lines of code
+before/after, which refactoring techniques you've used, which clone types
+you've fixed, and (when SciTools Understand is installed locally) real
+Cyclomatic Complexity, Weighted Methods per Class, Coupling, and
+Inheritance metrics for the file's current state.
+
+---
+
+## GitHub Pull Request Integration
+
+Beyond the IDE, CloneGuard also runs as a **team-level gate on every pull
+request**, via two GitHub Actions workflows in `.github/workflows/`. This
+is fully independent of the IntelliJ plugin — it works even for
+contributors who don't have CloneGuard installed locally at all.
+
+### `clone-check.yml` — scans every PR automatically
+
+Triggers on every PR **open, update, or reopen** that touches a `.java`
+file. For each changed file:
+
+1. Extracts every method (via regex, no local Java parser needed) and
+   sends them to the same detection server's `/scan` endpoint the plugin
+   uses
+2. For any clone with an available Extract Method suggestion, tries to
+   post it as a **real, clickable GitHub "Commit suggestion"** — but only
+   where GitHub actually allows one: the duplicate method's lines have to
+   genuinely be part of this PR's diff. Where they aren't, the suggestion
+   is included as a plain (non-clickable) code block in the summary
+   comment instead, with an explanation why.
+3. Posts a single PR summary comment: a table of every clone group found
+   (type, similarity, detection layer, severity), a **checklist** of
+   selectable clones, and a recommendation per group.
+4. **Blocks the merge check** if more than 3 clone groups are found
+   (fails the workflow); otherwise passes with a warning if any were found
+   at all.
+
+### `apply-refactors.yml` — applies your selections
+
+Comment **`/refactor`** on the PR to act on the checklist from
+`clone-check.yml`. This workflow:
+
+1. Reads the most recent CloneGuard checklist comment and parses which
+   boxes are checked
+2. **Re-verifies each selection against the file's current content**
+   before touching anything — so if two checked items would edit the same
+   method, only the first is applied; the rest are skipped with a clear
+   explanation rather than silently conflicting
+3. Commits the applied refactors directly to the PR branch and pushes —
+   this is deliberately a direct file edit rather than another GitHub
+   suggestion comment, since a direct edit isn't limited to lines already
+   part of the diff
+4. Comments back exactly what was applied and what was skipped (and why)
+5. The push itself re-triggers `clone-check.yml`, so the checklist
+   refreshes automatically
+
+### Required repository secrets
+
+Both workflows need two GitHub Actions secrets configured under
+**Settings → Secrets and variables → Actions**:
+
+| Secret | Purpose |
+|--------|---------|
+| `CLONEGUARD_SERVER_URL` | Same detection server the plugin uses by default — `https://cloneguard-server.onrender.com`, or your own self-hosted URL |
+| `CLONEGUARD_API_KEY` | Matches the plugin's configured key; omit (or leave blank) if your server is running unauthenticated |
+
+`GITHUB_TOKEN` (used for posting comments and, in `apply-refactors.yml`,
+pushing commits) is provided automatically by GitHub Actions — no setup
+needed for that one.
+
+---
+
+## How detection works
+
+| Type | Description | Method |
+|------|-------------|--------|
+| Type 1 | Exact duplicate, whitespace aside | Layer 1 — local, normalized Karp-Rabin hash |
+| Type 2 | Identical structure, renamed identifiers | Layer 1 — local, normalized identifier hash |
+| Type 3 | Near-miss — same core logic, minor differences | Layer 2 — server, CodeBERT + FAISS |
+| Type 4 | Semantic clone — same intent, different implementation | Layer 2 — server, CodeBERT + FAISS |
+
+Type 1/2 run entirely inside the IDE process, no network call — this is
+what makes the paste-time check fast enough to run interactively. Type 3/4
+are sent to the detection server's `/scan` (full-file) or `/check`
+(single-paste) endpoints, which run both layers internally and return
+final clone groups.
+
+### The detection server
+
+By default, the plugin points at a hosted instance:
+```
+https://cloneguard-server.onrender.com
+```
+running CodeBERT and UniXcoder for the embedding-based Layer 2 detection.
+Authentication is bearer-token based; a working key ships baked into the
+plugin by default, so a fresh install works immediately with no
+configuration. Both the **server URL** and the **API key** can be changed
+at **Settings/Preferences → Tools → CloneGuard** — useful if you're
+self-hosting the server or running your own deployment.
+
+---
+
+## Refactoring techniques
+
+CloneGuard picks the correct mechanical fix for the clone type found, and
+shows exactly what it's about to do before applying it.
+
+| Technique | Applies when |
+|-----------|--------------|
+| **Extract Method** | Two methods in the same class share a literal block of statements (Type 1/2/3) |
+| **Method Delegation** | Two methods have no shared code but a compatible signature (typically Type 4) |
+| **Pull Up Method** | Two methods live in sibling subclasses sharing a common superclass, and are structurally identical (exact match, or identical apart from renamed local variables — never renamed fields) |
+| **Push Down Method** | A method sits on a superclass but is only ever referenced from one specific subclass |
+
+Each technique includes its own safety checks — parameter mismatches,
+variables that escape the shared block, conditional returns without a
+guaranteed path, naming collisions — and refuses rather than guesses
+whenever it can't prove the refactor is safe.
+
+---
+
+## The Trend Dashboard
+
+Each **Scan Current File** opens a *session* — a snapshot of the file's
+current state. If you apply one or more refactors before the next scan,
+that session becomes a permanent data point the moment the next scan
+begins; scanning again with nothing changed records nothing. History is
+appended to `.cloneguard/metrics.jsonl` in your project root.
+
+Per session, the dashboard shows a before/after lines-of-code chart, a
+refactor-type breakdown, a clone-type breakdown, and — if **SciTools
+Understand** is installed locally — the current state's real design
+metrics:
+
+| Metric | Full name | What it measures | Understand column |
+|--------|-----------|-------------------|--------------------|
+| **CC** | Cyclomatic Complexity | Decision paths through the most complex method in the class | `MaxCyclomatic` |
+| **WMC** | Weighted Methods per Class | Sum of every method's complexity in the class | `SumCyclomatic` |
+| **CBO** | Coupling Between Objects | How many other classes this class references | `CountClassCoupled` |
+| **DIT** | Depth of Inheritance Tree | How many levels up the class hierarchy this class sits | `MaxInheritanceTree` |
+| **NOC** | Number of Children | How many other classes directly extend this class | `CountClassDerived` |
+
+(LOC is tracked too, but from the plugin's own line count, shown on the
+chart above rather than in this metrics row.)
+
+**Understand is entirely optional** and completely separate from the
+detection server — it's a locally installed desktop tool used only to
+power this one dashboard row. Everything else in CloneGuard works fully
+without it.
+
+### Installing Understand (optional)
+
+1. Download and license from [scitools.com](https://scitools.com) (free
+   educational licenses available)
+2. CloneGuard looks for `und` at its default macOS install path,
+   `/Applications/Understand.app/Contents/MacOS/und`
+
+**A real gotcha:** adding `und` to your shell's `PATH` does **not** make it
+visible to IntelliJ. IntelliJ is a GUI app, and GUI apps on macOS don't
+inherit PATH changes made in a terminal. This is why CloneGuard checks
+Understand's known install location directly rather than trusting PATH.
+
+If Understand isn't installed, the dashboard simply shows "Understand not
+available" for that row — nothing else is affected.
+
+---
+
+## Building from source
+
+For contributors, or to build the plugin `.zip` yourself:
 
 ```bash
-# Copy CloneGuard-IntelliJ folder to your Desktop
-cp -r CloneGuard-IntelliJ ~/Desktop/
-```
+# 1. Get the repo
+cd ~/Desktop
+git clone <repo-url> clone-propagation
+cd clone-propagation
 
-### Step 2 — Open in IntelliJ as a Gradle project
+# 2. Open the plugin subfolder in IntelliJ IDEA Ultimate
+#    File → Open → select clone-propagation/plugin → "Open as Project"
+#    Trust the project, wait for Gradle sync (first run downloads the
+#    IntelliJ Platform SDK — several hundred MB)
 
-1. Open IntelliJ IDEA
-2. File → Open → select the `CloneGuard-IntelliJ` folder
-3. When prompted, click **"Open as Project"**
-4. Trust the project
-5. Wait for Gradle sync to complete (it downloads the IntelliJ Plugin SDK — ~500MB first time)
-
-### Step 3 — Check your IntelliJ version
-
-Open IntelliJ → Help → About → note the version number.
-If your version is **2024.x**, update `build.gradle`:
-```groovy
-intellij {
-    version = '2024.1.7'   // ← change to match your version
-}
-```
-
-### Step 4 — Start the Python server
-
-```bash
-cd ~/Desktop/CloneGuard
-source venv/bin/activate
-export KMP_DUPLICATE_LIB_OK=TRUE
-python server.py
-```
-
-Verify it's running: `curl http://localhost:8765/health`
-
-### Step 5 — Run the plugin in sandbox IDE
-
-In IntelliJ terminal:
-```bash
+# 3. Run it in a sandboxed IDE instance
+cd plugin
 ./gradlew runIde
 ```
 
-This opens a second IntelliJ window (the "sandbox IDE") with CloneGuard installed.
+`runIde` opens a second, separate IntelliJ window with the plugin already
+installed — the safe way to test without touching your main IDE install.
 
----
-
-## How to Test
-
-### Scenario 1 — Ghost Text Interception
-
-1. In the sandbox IDE, open any Java file
-2. Write a function, e.g.:
-   ```java
-   public int sum(int[] arr) {
-       int total = 0;
-       for (int x : arr) total += x;
-       return total;
-   }
-   ```
-3. Start typing a clone of it — JetBrains AI will suggest completion
-4. **Before pressing Tab**, CloneGuard fires a warning popup
-5. Choose: **Use Existing Function / Accept Anyway / Dismiss**
-
-### Scenario 2 — Full File Scan
-
-1. In the sandbox IDE, open a Java file with multiple similar methods
-2. Press **Ctrl+Shift+G** (or Tools → CloneGuard → Scan Current File)
-3. The CloneGuard panel opens at the bottom showing all clone groups
-4. Click **Refactor →** on any group to see the refactoring suggestion
-
----
-
-## Detection Logic
-
-### Layer 1 (Local — no server needed)
-| Clone Type | Method |
-|-----------|--------|
-| Type 1 — Exact | Karp-Rabin hash on whitespace-normalized code |
-| Type 2 — Renamed | Karp-Rabin hash after replacing identifiers with VAR/FUNC |
-
-### Layer 2 (Python Server — localhost:8765)
-| Clone Type | Method |
-|-----------|--------|
-| Type 3 — Near-Miss | CodeBERT embeddings + FAISS cosine similarity |
-| Type 4 — Semantic | CodeBERT embeddings + FAISS cosine similarity |
-
-Layer 1 runs first (instant, no network). Layer 2 only runs if Layer 1 finds nothing.
-
----
-
-## Build the plugin JAR (for distribution)
-
+To produce a distributable `.zip`:
 ```bash
 ./gradlew buildPlugin
 ```
+Output: `plugin/build/distributions/CloneGuard-<version>.zip`
 
-Output: `build/distributions/CloneGuard-1.0.0.zip`
+### Build requirements
 
-Install in any IntelliJ: Settings → Plugins → ⚙ → Install Plugin from Disk
+- **IntelliJ IDEA Ultimate** (the plugin targets `type = 'IU'` in
+  `build.gradle` — Community edition cannot build or run it)
+- **Java 17+** — the IntelliJ Platform itself has run on JBR 17 since the
+  2022.3 release line; IntelliJ's own bundled JDK satisfies this
+- **IntelliJ Platform version**: currently targets `2026.1.3`
+  (`sinceBuild 233`, `untilBuild 261.*` in `build.gradle`) — if your
+  installed IntelliJ version falls outside that range, update these
+  values to match before building
+
+### Self-hosting the detection server
+
+Only needed if you're developing against server-side changes, or want your
+own private deployment instead of the shared hosted instance:
+
+```bash
+cd server
+source venv/bin/activate   # or create one: python -m venv venv
+python server.py
+curl http://localhost:8765/health
+```
+
+Then point the plugin at it: **Settings/Preferences → Tools → CloneGuard**,
+set Server URL to `http://localhost:8765`, and clear the API key field
+(local dev instances typically run unauthenticated).
+
+---
+
+## Trying it out
+
+**Paste interception:** open a Java file with an existing method, paste a
+near-duplicate elsewhere in the same file — a warning should appear.
+
+**Full scan:** open a file with two or more similar methods, then
+**Tools → CloneGuard → Scan Current File**. Click **Refactor →** on any
+group in the Scan Results tab to apply the suggested fix.
+
+**Trend Dashboard:** after applying at least one refactor and scanning
+again, open the **Trend Dashboard** tab (next to Scan Results).
 
 ---
 
 ## Troubleshooting
 
-**Gradle sync fails:** Make sure Java 17 is set. IntelliJ → File → Project Structure → SDK
+**Gradle sync fails** — confirm Project SDK is Java 17+: File → Project
+Structure → SDK.
 
-**`runIde` opens but plugin not visible:** Check Help → About in sandbox IDE matches the version in build.gradle
+**Can't open the project / build fails oddly** — confirm you're using
+IntelliJ IDEA **Ultimate**, not Community.
 
-**Ghost text not intercepted:** JetBrains AI must be enabled. Check Settings → Tools → AI Assistant
+**`runIde` opens but plugin isn't visible** — check that the sandbox IDE's
+own Help → About version falls within `build.gradle`'s `sinceBuild`/
+`untilBuild` range.
 
-**Layer 2 not working:** Make sure Python server is running: `curl localhost:8765/health`
+**Paste interception never fires** — this relies on JetBrains AI Assistant
+being enabled (Settings → Tools → AI Assistant); it also only fires on
+insertions large enough to plausibly be a full method.
+
+**Getting 401s from the detection server** — your configured API key
+(Settings → Tools → CloneGuard) doesn't match what the server expects.
+Clear it if you're pointing at an unauthenticated local server, or confirm
+you're using the correct key for a hosted deployment.
+
+**First request after inactivity is slow** — expected. The hosted server
+spins down after idle periods (Render's standard behavior) and takes a
+moment to wake back up.
+
+**Trend Dashboard says "Understand not available"** — confirm `und
+version` works from a terminal, and see the PATH note above — this is the
+most common cause on macOS.
+
+**Understand's numbers look like they're from before your refactor, not
+after** — make sure you're on a build where the file is explicitly saved
+to disk before the "after" Understand analysis runs. Understand reads the
+file straight from disk as an external process; if IntelliJ hadn't flushed
+its in-memory edit yet, it would silently analyze stale content.
+
+**PR check never runs** — confirm `CLONEGUARD_SERVER_URL` and
+`CLONEGUARD_API_KEY` are set as repository secrets (Settings → Secrets and
+variables → Actions), and that the PR actually touches a `.java` file —
+the workflow's `paths` filter skips everything else.
+
+**`/refactor` comment does nothing** — the workflow only looks for the
+*most recent* CloneGuard checklist comment on that PR. If `clone-check.yml`
+hasn't posted one yet (e.g. it's still running, or found zero clones),
+there's nothing to act on.
+
+**Inline "Commit suggestion" isn't clickable, shows as a plain code block
+instead** — this is expected, not a bug, whenever the duplicate method's
+lines aren't part of this specific PR's diff. GitHub only allows anchoring
+a review-comment suggestion to lines actually touched by the diff; the
+fallback code block exists precisely for this case.
