@@ -267,10 +267,20 @@ own private deployment instead of the shared hosted instance:
 
 ```bash
 cd server
-source venv/bin/activate   # or create one: python -m venv venv
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 python server.py
 curl http://localhost:8765/health
 ```
+
+`requirements.txt` pulls in: Flask + Flask-CORS (the HTTP server itself),
+a CPU-only build of PyTorch (via `--extra-index-url
+https://download.pytorch.org/whl/cpu` — deliberately CPU rather than CUDA,
+since this needs to run on ordinary hosting like Render's free/standard
+tiers, not GPU infrastructure), Transformers (loads CodeBERT and
+UniXcoder), FAISS-CPU (the similarity search behind Layer 2 detection),
+and NumPy.
 
 Then point the plugin at it: **Settings/Preferences → Tools → CloneGuard**,
 set Server URL to `http://localhost:8765`, and clear the API key field
