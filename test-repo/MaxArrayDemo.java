@@ -20,3 +20,4 @@ public class MaxArrayDemo {
         return maxOfArrayRecursive(arr, idx + 1, best);
     }
 }
+
