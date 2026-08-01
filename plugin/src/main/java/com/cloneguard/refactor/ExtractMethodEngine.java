@@ -971,6 +971,9 @@ public class ExtractMethodEngine {
             // with anything nested arbitrarily deep inside loop bodies,
             // if-blocks, or blocks within blocks.
             locallyAvailable.addAll(PsiTreeUtil.findChildrenOfType(stmt, PsiLocalVariable.class));
+            if (stmt instanceof PsiForeachStatement selfFe) {
+                locallyAvailable.add(selfFe.getIterationParameter());
+            }
             for (PsiForeachStatement fe : PsiTreeUtil.findChildrenOfType(stmt, PsiForeachStatement.class)) {
                 locallyAvailable.add(fe.getIterationParameter());
             }
