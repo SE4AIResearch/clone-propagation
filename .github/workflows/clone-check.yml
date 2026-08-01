@@ -42,13 +42,6 @@ jobs:
         id: scan
         env:
           CLONEGUARD_URL: ${{ secrets.CLONEGUARD_SERVER_URL }}
-          # FIX (professor-flagged, follow-up round -- High): the server
-          # now supports bearer-token auth, but this workflow never
-          # actually sent the key in its request headers below --
-          # meaning every scan would get a silent 401 the moment auth is
-          # turned on server-side. Reading it here as its own env var,
-          # separate from CLONEGUARD_URL, mirrors exactly how the plugin
-          # side keeps the URL and the key as two separate settings.
           CLONEGUARD_API_KEY: ${{ secrets.CLONEGUARD_API_KEY }}
         run: |
           python3 << 'PYTHON'
@@ -176,11 +169,22 @@ jobs:
           print(f"\nTotal clones found: {total_clones}")
           PYTHON
 
-      # Step 4: For each clone group with an available Extract Method
-      # suggestion, decide whether it can be posted as a real clickable
-      # GitHub "Commit suggestion" (only possible if the duplicate method's
-      # lines are actually part of this PR's diff) or must fall back to a
-      # plain, non-clickable code block in the summary comment.
+      # Step 4: For each clone group with an available refactor suggestion,
+      # decide whether it can be posted as a real clickable GitHub "Commit
+      # suggestion" (only possible if the duplicate method's lines are
+      # actually part of this PR's diff) or must fall back to a plain,
+      # non-clickable code block in the summary comment.
+      #
+      # FIX (found live, testing the GCD/Type-4 case): this step assumed
+      # every suggestion was Extract-Method-shaped and always read
+      # suggestion['matchedStatements'], ['helperName'], ['helperCode'] --
+      # keys that only exist for that technique. A Method Delegation
+      # suggestion (what a genuine Type 4 semantic clone actually gets,
+      # since there's no shared literal statement block to extract) has
+      # none of those keys, and the workflow crashed with a KeyError the
+      # first time a real Type-4 pair was tested end-to-end here. Branching
+      # on suggestion['technique'] mirrors exactly how apply-refactors.yml
+      # already handles this same distinction elsewhere in this repo.
       - name: Post refactor suggestions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -268,14 +272,25 @@ jobs:
                   )
                   continue
 
-              body = (
-                  f"**CloneGuard — Extract Method suggestion**\n\n"
-                  f"`{dup_name}()` shares {suggestion['matchedStatements']} statement(s) "
-                  f"with `{g['functionA']}()`. Proposed: extract the shared logic into "
-                  f"`{suggestion['helperName']}()` and delegate.\n\n"
-                  f"```suggestion\n{suggestion['newDuplicateBody']}\n\n"
-                  f"{suggestion['helperCode']}\n```"
-              )
+              # FIX applied here: branch on technique before reading
+              # technique-specific keys, instead of assuming Extract
+              # Method's keys always exist.
+              if suggestion.get("technique") == "delegation":
+                  body = (
+                      f"**CloneGuard — Method Delegation suggestion**\n\n"
+                      f"`{dup_name}()` computes the same result as `{g['functionA']}()` "
+                      f"through different logic. Proposed: rewrite it to delegate directly.\n\n"
+                      f"```suggestion\n{suggestion['newDuplicateBody']}\n```"
+                  )
+              else:
+                  body = (
+                      f"**CloneGuard — Extract Method suggestion**\n\n"
+                      f"`{dup_name}()` shares {suggestion['matchedStatements']} statement(s) "
+                      f"with `{g['functionA']}()`. Proposed: extract the shared logic into "
+                      f"`{suggestion['helperName']}()` and delegate.\n\n"
+                      f"```suggestion\n{suggestion['newDuplicateBody']}\n\n"
+                      f"{suggestion['helperCode']}\n```"
+                  )
 
               try:
                   comment_body = {
@@ -360,22 +375,6 @@ jobs:
                   "suggestion** without using this checklist.)\n\n"
               )
               for i, g in enumerate(groups, 1):
-                  # FIX (found live, testing the restored checklist): the
-                  # checkbox line was using g['filename'], which is
-                  # deliberately just os.path.basename(filepath) -- fine
-                  # for a clean, readable comment, but apply-refactors.yml
-                  # runs as a completely separate workflow later and has
-                  # NOTHING to work with except this comment's own text.
-                  # A bare basename like "SumSquaresDemo.java" gives it no
-                  # way to know the file actually lives at
-                  # "server/SumSquaresDemo.java" -- it tries
-                  # os.path.exists() on the bare name from the repo root,
-                  # finds nothing, and reports "not found", even though
-                  # the real file exists exactly where it's supposed to.
-                  # g['filepath'] (the full relative path, already tracked
-                  # separately alongside the display-only basename) is
-                  # what actually needs to round-trip through this
-                  # checkbox text, not g['filename'].
                   type_label = g["cloneType"].split("—")[0].strip()
                   technique = "Extract Method" if "Type 1" in type_label or "Type 2" in type_label else "Method Delegation"
                   body += (
@@ -404,7 +403,13 @@ jobs:
                       s = g["suggestion"]
                       body += f"<details><summary>📋 {g['functionB']}() — suggested refactor (not part of this PR's diff, copy manually)</summary>\n\n"
                       body += f"*{g.get('suggestionFallbackReason', '')}*\n\n"
-                      body += f"```java\n{s['newDuplicateBody']}\n\n{s['helperCode']}\n```\n</details>\n\n"
+                      # FIX applied here too: same technique branching, so
+                      # the fallback code block doesn't crash on a
+                      # delegation suggestion either.
+                      if s.get("technique") == "delegation":
+                          body += f"```java\n{s['newDuplicateBody']}\n```\n</details>\n\n"
+                      else:
+                          body += f"```java\n{s['newDuplicateBody']}\n\n{s['helperCode']}\n```\n</details>\n\n"
 
               not_extractable = [g for g in groups if g.get("suggestion") and not g["suggestion"].get("available")]
               if not_extractable:
