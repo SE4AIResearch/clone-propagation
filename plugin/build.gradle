@@ -18,7 +18,7 @@ intellij {
 
 patchPluginXml {
     sinceBuild = '233'
-    untilBuild = '261.*'
+    untilBuild = '262.*'
 }
 
 compileJava {
