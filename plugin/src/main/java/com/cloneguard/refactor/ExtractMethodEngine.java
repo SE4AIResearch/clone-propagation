@@ -326,7 +326,7 @@ public class ExtractMethodEngine {
         // moments earlier.
         PsiDocumentManager.getInstance(project).commitAllDocuments();
 
-        PsiFile psiFile = ReadAction.compute(() -> PsiManager.getInstance(project).findFile(targetFile));
+        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
         if (psiFile == null) {
             showDialog(
                     "Could not read the target file. Make sure it is saved.",
@@ -946,17 +946,33 @@ public class ExtractMethodEngine {
         locallyAvailable.addAll(Arrays.asList(params));
         for (int i = 0; i < rangeLen; i++) {
             PsiStatement stmt = stmts[rangeStart + i];
-            if (stmt instanceof PsiDeclarationStatement decl) {
-                locallyAvailable.addAll(Arrays.asList(decl.getDeclaredElements()));
-            }
-            if (stmt instanceof PsiForStatement forStmt) {
-                PsiStatement init = forStmt.getInitialization();
-                if (init instanceof PsiDeclarationStatement initDecl) {
-                    locallyAvailable.addAll(Arrays.asList(initDecl.getDeclaredElements()));
-                }
-            }
-            if (stmt instanceof PsiForeachStatement foreachStmt) {
-                locallyAvailable.add(foreachStmt.getIterationParameter());
+            // FIX (found live, VowelCountDemo test -- Type 1 clone with a
+            // variable declared inside a for-loop's BODY, e.g.
+            // `char ch = lower.charAt(i);` nested one level inside the
+            // loop, itself inside the matched shared block): the previous
+            // version below only checked ONE level deep -- a directly
+            // top-level declaration statement, or a for-loop's own
+            // `init` clause -- and never walked INTO a loop's or
+            // conditional's body to find variables declared there. Such a
+            // variable was invisible to this scan, then correctly found by
+            // the separate reference-search further down (which DOES walk
+            // the full nested tree via PsiTreeUtil.findChildrenOfType),
+            // and consequently misidentified as an external dependency
+            // with nowhere to trace it back to -- producing "CloneGuard
+            // cannot safely extract" on a pair that was actually a
+            // byte-for-byte identical Type 1 clone with nothing genuinely
+            // external at all. Recursively collecting every local
+            // variable and foreach iteration parameter declared anywhere
+            // in the block's subtree closes this gap in one pass, and
+            // subsumes all three of the previous manual cases: a
+            // top-level declaration is still a PsiLocalVariable, and a
+            // for-loop's init variable is still a PsiLocalVariable too --
+            // both are found by the same recursive search below, along
+            // with anything nested arbitrarily deep inside loop bodies,
+            // if-blocks, or blocks within blocks.
+            locallyAvailable.addAll(PsiTreeUtil.findChildrenOfType(stmt, PsiLocalVariable.class));
+            for (PsiForeachStatement fe : PsiTreeUtil.findChildrenOfType(stmt, PsiForeachStatement.class)) {
+                locallyAvailable.add(fe.getIterationParameter());
             }
         }
 
@@ -1033,7 +1049,7 @@ public class ExtractMethodEngine {
 
         PsiDocumentManager.getInstance(project).commitAllDocuments();
 
-        PsiFile psiFile = ReadAction.compute(() -> PsiManager.getInstance(project).findFile(targetFile));
+        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
         if (psiFile == null) {
             showDialog("Could not read the target file. Make sure it is saved.", "CloneGuard", JOptionPane.WARNING_MESSAGE);
             return;
@@ -1549,7 +1565,7 @@ public class ExtractMethodEngine {
         if (targetFile == null || !targetFile.isValid()) return false;
 
         PsiDocumentManager.getInstance(project).commitAllDocuments();
-        PsiFile psiFile = ReadAction.compute(() -> PsiManager.getInstance(project).findFile(targetFile));
+        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
         if (psiFile == null) return false;
 
         final String canonicalName = canonical;
@@ -1605,7 +1621,7 @@ public class ExtractMethodEngine {
 
         PsiDocumentManager.getInstance(project).commitAllDocuments();
 
-        PsiFile psiFile = ReadAction.compute(() -> PsiManager.getInstance(project).findFile(targetFile));
+        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
         if (psiFile == null) {
             showDialog("Could not read the target file. Make sure it is saved.", "CloneGuard", JOptionPane.WARNING_MESSAGE);
             return;
@@ -1953,7 +1969,7 @@ public class ExtractMethodEngine {
 
         PsiDocumentManager.getInstance(project).commitAllDocuments();
 
-        PsiFile psiFile = ReadAction.compute(() -> PsiManager.getInstance(project).findFile(targetFile));
+        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
         if (psiFile == null) {
             showDialog("Could not read the target file. Make sure it is saved.", "CloneGuard", JOptionPane.WARNING_MESSAGE);
             return;
