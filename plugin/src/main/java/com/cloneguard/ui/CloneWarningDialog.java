@@ -210,32 +210,30 @@ public class CloneWarningDialog extends DialogWrapper {
             // editable keystroke whenever no completion popup is
             // intercepting it first.
             //
-            // IMPORTANT, HONEST CAVEAT: unlike every other fix made
-            // tonight, this one could not be compiled or executed in this
-            // session -- there is no IntelliJ Platform test harness
-            // available here. The class below,
-            // InlineCompletionSession, is confirmed to genuinely exist
-            // (verified against JetBrains' own platform source), but its
-            // exact method signatures could not be independently
-            // confirmed without IDE/SDK access, and this API's surface is
-            // known to change across platform versions. Reflection is
-            // used deliberately here instead of a direct import + method
-            // call: if a method name below turns out to be wrong for your
-            // exact target platform version, this fails at RUNTIME (caught
-            // below, falls through to the original approach) rather than
-            // failing to COMPILE the whole plugin. This should be verified
-            // against your actual build.gradle platform version and
-            // tested live before being fully trusted -- treat it as a
-            // best-effort improvement with a safe fallback, not a
-            // guaranteed-correct replacement.
+            // FIX (found live, this session): confirmed by direct
+            // reproduction -- clicking "Accept Anyway" on a real clipboard
+            // paste (not AI ghost text) caused the CloneGuard warning
+            // dialog to reappear a second time immediately afterward.
+            // Traced to this exact fallback: for a genuine clipboard
+            // paste, the pasted code is ALREADY in the document by the
+            // time this dialog even appears -- the paste-detection
+            // DocumentListener only fires after the insert has already
+            // happened. There is no InlineCompletionSession to accept in
+            // that case (nothing is pending), so the reflection lookup
+            // below correctly returns null -- but the old code then fell
+            // through to firing a synthetic Tab keypress anyway, with no
+            // real target for it. That blind Tab could land on an
+            // unrelated, coincidentally-active AI suggestion at the
+            // current cursor position and accept THAT instead, inserting
+            // new text that the paste-detection listener then caught as
+            // a fresh paste-like event, reopening this same dialog.
             //
-            // If no active session is found this way -- for instance,
-            // because the ghost text in use actually comes from a
-            // third-party plugin (e.g. GitHub Copilot) that predates or
-            // doesn't integrate with this shared platform API -- this
-            // falls back to the original keystroke-based approach, since
-            // a known-imperfect fallback is preferable to silently doing
-            // nothing.
+            // The fix: if no active InlineCompletionSession is found, do
+            // nothing further. A real clipboard paste needs no "accept"
+            // step at all -- the code is already committed to the file.
+            // Only dispatch to InlineCompletionSession.accept() when a
+            // session genuinely exists (the true AI-ghost-text case this
+            // method was originally built for).
             try {
                 Class<?> sessionClass = Class.forName(
                         "com.intellij.codeInsight.inline.completion.session.InlineCompletionSession");
@@ -244,19 +242,19 @@ public class CloneWarningDialog extends DialogWrapper {
                 if (session != null) {
                     java.lang.reflect.Method accept = sessionClass.getMethod("accept");
                     accept.invoke(session);
-                    return;
                 }
+                // No active session found: the pasted code is already in
+                // the document, so there is nothing further to do. Do NOT
+                // fall back to a synthetic Tab keypress here -- see the
+                // full explanation above.
             } catch (Throwable t) {
                 // API not present on this platform version, method
-                // signature didn't match, or the active ghost text doesn't
-                // go through this session type -- fall through below.
+                // signature didn't match for this platform build, or the
+                // active ghost text doesn't go through this session type
+                // at all -- same reasoning as above applies: do nothing
+                // further rather than risk an untargeted Tab keypress
+                // triggering unrelated editor behavior.
             }
-
-            Component comp = editor.getContentComponent();
-            comp.dispatchEvent(new java.awt.event.KeyEvent(
-                    comp, java.awt.event.KeyEvent.KEY_PRESSED,
-                    System.currentTimeMillis(), 0,
-                    java.awt.event.KeyEvent.VK_TAB, '\t'));
         });
     }
 

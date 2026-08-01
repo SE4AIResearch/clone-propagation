@@ -51,6 +51,28 @@ public class InlineSuggestionListener implements EditorFactoryListener {
     // scan anyway, so there's no need to explicitly remove entries here.
     private final Set<String> shownPushDownCandidates = ConcurrentHashMap.newKeySet();
 
+    // FIX (found live, this session): a single real Cmd+V paste was
+    // observed producing TWO separate CloneWarningDialog popups and two
+    // separate refactor notifications, back to back. Root cause: IntelliJ's
+    // smart-paste feature auto-reindents inserted code immediately after
+    // the raw insertion, which fires DocumentListener.documentChanged() a
+    // SECOND time with a fragment that's nearly identical to the first
+    // (same code, different leading whitespace per line from reformatting).
+    // Nothing in documentChanged() previously distinguished "a genuinely
+    // new paste" from "an echo of the paste we just handled a moment ago,"
+    // so both fired handleInsertion() independently, each producing its
+    // own dialog and its own notification.
+    //
+    // Fix: track the whitespace-normalized text of the most recently
+    // handled insertion, plus when it was handled. A second insertion
+    // whose normalized text matches within a short window (2 seconds --
+    // comfortably longer than any reformat-after-paste delay, but far
+    // shorter than the time between two genuinely separate, deliberate
+    // pastes) is treated as an echo and skipped, not re-handled.
+    private volatile String lastHandledNormalized = null;
+    private volatile long lastHandledAtMillis = 0L;
+    private static final long DEDUP_WINDOW_MILLIS = 2000L;
+
     @Override
     public void editorCreated(@NotNull EditorFactoryEvent event) {
         Editor editor = event.getEditor();
@@ -82,6 +104,24 @@ public class InlineSuggestionListener implements EditorFactoryListener {
                 String inserted = e.getNewFragment().toString();
 
                 if (inserted.length() > 30 && looksLikeJavaMethod(inserted)) {
+                    // FIX (found live, this session): de-duplicate against
+                    // IntelliJ's own auto-reindent-after-paste re-firing
+                    // this listener with near-identical content moments
+                    // after the real insertion. See field javadoc above for
+                    // the full explanation.
+                    String normalized = inserted.replaceAll("\\s+", " ").trim();
+                    long now = System.currentTimeMillis();
+                    boolean isEcho = normalized.equals(lastHandledNormalized)
+                            && (now - lastHandledAtMillis) < DEDUP_WINDOW_MILLIS;
+
+                    if (isEcho) {
+                        LOG.info("CloneGuard: skipping duplicate insertion event (likely auto-reindent echo of the same paste)");
+                        return;
+                    }
+
+                    lastHandledNormalized = normalized;
+                    lastHandledAtMillis = now;
+
                     LOG.info("CloneGuard: Java method insertion detected, length=" + inserted.length());
                     handleInsertion(editor, project, inserted, e.getOffset());
                 }
