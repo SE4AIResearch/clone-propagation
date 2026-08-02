@@ -193,6 +193,36 @@ public final class UnderstandMetricsService {
             colIndex.put(headers[i], i);
         }
 
+        // FIX (found live, Pull Up demo test): this used to return on the
+        // FIRST matching class-kind row for the file and stop there. That
+        // was correct for the common one-class-per-file case, but our
+        // Pull Up/Push Down demo intentionally puts multiple classes in a
+        // single file (Employee/Manager/Engineer) so CloneGuard's
+        // single-file scanner can see the clone across them -- and
+        // against a multi-class file, "first row" silently meant "always
+        // the same one class, regardless of which class actually
+        // changed," making before/after look identical even after a
+        // real refactor. Aggregating across every class-row for this
+        // file instead: MaxCyclomatic and MaxInheritanceTree take the
+        // worst value found (still meaningful as file-level maxima);
+        // SumCyclomatic, CountClassCoupled, and CountClassDerived are
+        // summed, since those are naturally additive across classes and
+        // summing SumCyclomatic in particular is what actually reflects
+        // duplicate-method elimination (two classes each owning a copy,
+        // reduced to one shared copy, is a real drop in the file's total).
+        // Note: for a Pull Up specifically, DIT and NOC are expected to
+        // legitimately stay unchanged -- moving an existing method
+        // between existing classes doesn't alter inheritance depth or
+        // child counts, so "before == after" there is a correct reading,
+        // not a bug.
+        boolean found = false;
+        int maxCyclomatic = 0;
+        int sumCyclomatic = 0;
+        int totalLoc = 0;
+        int sumCoupled = 0;
+        int maxInheritance = 0;
+        int sumDerived = 0;
+
         for (int i = 1; i < lines.size(); i++) {
             String[] row = splitCsvLine(lines.get(i));
             if (row.length <= colIndex.getOrDefault("Kind", -1)) continue;
@@ -204,20 +234,25 @@ public final class UnderstandMetricsService {
             if (file == null || !new File(file).getAbsolutePath()
                     .equals(new File(targetFilePath).getAbsolutePath())) continue;
 
-            UnderstandMetrics m = new UnderstandMetrics();
-            // See the FIX comment above analyzeFile()'s settings call --
-            // "Cyclomatic" is blank at class granularity; MaxCyclomatic
-            // (worst single method in the class) is what's actually
-            // populated here and is what CC now reflects.
-            m.cyclomaticComplexity = parseIntSafe(safeGet(row, colIndex, "MaxCyclomatic"));
-            m.weightedMethodsPerClass = parseIntSafe(safeGet(row, colIndex, "SumCyclomatic"));
-            m.linesOfCode = parseIntSafe(safeGet(row, colIndex, "CountLineCode"));
-            m.couplingBetweenObjects = parseIntSafe(safeGet(row, colIndex, "CountClassCoupled"));
-            m.depthOfInheritance = parseIntSafe(safeGet(row, colIndex, "MaxInheritanceTree"));
-            m.numberOfChildren = parseIntSafe(safeGet(row, colIndex, "CountClassDerived"));
-            return m;
+            found = true;
+            maxCyclomatic = Math.max(maxCyclomatic, parseIntSafe(safeGet(row, colIndex, "MaxCyclomatic")));
+            sumCyclomatic += parseIntSafe(safeGet(row, colIndex, "SumCyclomatic"));
+            totalLoc += parseIntSafe(safeGet(row, colIndex, "CountLineCode"));
+            sumCoupled += parseIntSafe(safeGet(row, colIndex, "CountClassCoupled"));
+            maxInheritance = Math.max(maxInheritance, parseIntSafe(safeGet(row, colIndex, "MaxInheritanceTree")));
+            sumDerived += parseIntSafe(safeGet(row, colIndex, "CountClassDerived"));
         }
-        return null; // No matching class-level row found for this file.
+
+        if (!found) return null; // No matching class-level row found for this file.
+
+        UnderstandMetrics m = new UnderstandMetrics();
+        m.cyclomaticComplexity = maxCyclomatic;
+        m.weightedMethodsPerClass = sumCyclomatic;
+        m.linesOfCode = totalLoc;
+        m.couplingBetweenObjects = sumCoupled;
+        m.depthOfInheritance = maxInheritance;
+        m.numberOfChildren = sumDerived;
+        return m;
     }
 
     private String safeGet(String[] row, Map<String, Integer> colIndex, String col) {

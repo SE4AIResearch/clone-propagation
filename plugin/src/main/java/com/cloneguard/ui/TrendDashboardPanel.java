@@ -335,15 +335,15 @@ public class TrendDashboardPanel {
             // Each chip below gets a short one-line tooltip explaining
             // what the metric means -- hover to see it, since six
             // acronyms in a row means nothing to a first-time viewer.
-            understandMetricsContainer.add(understandChip("CC", latest.complexityAfter, new Color(99, 90, 197),
+            understandMetricsContainer.add(understandBarChip("CC", latest.complexityBefore, latest.complexityAfter, new Color(99, 90, 197),
                     "Cyclomatic Complexity (worst method in the class): number of independent decision paths through it."));
-            understandMetricsContainer.add(understandChip("WMC", latest.wmcAfter, new Color(46, 139, 87),
+            understandMetricsContainer.add(understandBarChip("WMC", latest.wmcBefore, latest.wmcAfter, new Color(46, 139, 87),
                     "Weighted Methods per Class: sum of every method's complexity in the class."));
-            understandMetricsContainer.add(understandChip("CBO", latest.cboAfter, new Color(197, 90, 17),
+            understandMetricsContainer.add(understandBarChip("CBO", latest.cboBefore, latest.cboAfter, new Color(197, 90, 17),
                     "Coupling Between Objects: how many other classes this class references."));
-            understandMetricsContainer.add(understandChip("DIT", latest.ditAfter, new Color(184, 134, 11),
+            understandMetricsContainer.add(understandBarChip("DIT", latest.ditBefore, latest.ditAfter, new Color(184, 134, 11),
                     "Depth of Inheritance Tree: how many levels up the class hierarchy this class sits."));
-            understandMetricsContainer.add(understandChip("NOC", latest.nocAfter, new Color(90, 143, 214),
+            understandMetricsContainer.add(understandBarChip("NOC", latest.nocBefore, latest.nocAfter, new Color(90, 143, 214),
                     "Number of Children: how many other classes directly extend this class."));
         } else {
             understandStatusLabel.setText(
@@ -392,6 +392,100 @@ public class TrendDashboardPanel {
         chip.setFont(chip.getFont().deriveFont(Font.PLAIN, 12f));
         chip.setToolTipText(tooltip);
         return chip;
+    }
+
+    /**
+     * Bar-visualization version of understandChip() above: same label,
+     * color, and tooltip, but now also draws a small before/after bar
+     * pair (muted gray vs the metric's color) instead of showing only
+     * the raw number. Mirrors the same visual language the LOC chart
+     * already uses elsewhere on this panel -- muted bar for "before",
+     * colored bar for "after" -- so a viewer doesn't need to learn a
+     * second visual convention just because this row uses a single
+     * latest-session snapshot instead of a multi-session trend line.
+     */
+    private JPanel understandBarChip(String label, int before, int after, Color color, String tooltip) {
+        JPanel chip = new JPanel();
+        chip.setLayout(new BoxLayout(chip, BoxLayout.Y_AXIS));
+        chip.setOpaque(false);
+        chip.setToolTipText(tooltip);
+
+        JLabel nameLabel = new JLabel(label);
+        nameLabel.setForeground(color);
+        nameLabel.setFont(nameLabel.getFont().deriveFont(Font.BOLD, 11f));
+        nameLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        chip.add(nameLabel);
+
+        MiniBarPair bars = new MiniBarPair(before, after, color);
+        bars.setAlignmentX(Component.LEFT_ALIGNMENT);
+        bars.setToolTipText(tooltip);
+        chip.add(bars);
+
+        JLabel valueLabel = new JLabel(before + " \u2192 " + after);
+        valueLabel.setForeground(JBColor.GRAY);
+        valueLabel.setFont(valueLabel.getFont().deriveFont(Font.PLAIN, 10f));
+        valueLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        chip.add(valueLabel);
+
+        return chip;
+    }
+
+    /**
+     * Tiny custom-painted paired-bar widget: "before" (muted gray) next
+     * to "after" (the metric's own color), each scaled against this
+     * metric's own before/after max -- deliberately NOT scaled against
+     * the other metrics, since CC and CBO can differ by an order of
+     * magnitude and forcing one shared scale would make the smaller
+     * metric's bars unreadably thin. This is a fixed-size decoration
+     * alongside the numeric label, not a general chart component --
+     * matches the scope of the existing LOC chart above, which is also
+     * explicitly documented as deliberately simple rather than a
+     * general-purpose charting widget.
+     */
+    private static class MiniBarPair extends JPanel {
+        private final int before;
+        private final int after;
+        private final Color afterColor;
+        private static final int WIDTH = 56;
+        private static final int HEIGHT = 30;
+        private static final int BAR_W = 14;
+
+        MiniBarPair(int before, int after, Color afterColor) {
+            this.before = before;
+            this.after = after;
+            this.afterColor = afterColor;
+            setOpaque(false);
+            Dimension size = new Dimension(WIDTH, HEIGHT);
+            setPreferredSize(size);
+            setMaximumSize(size);
+            setMinimumSize(size);
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            super.paintComponent(g);
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+            int max = Math.max(1, Math.max(before, after));
+            int baseline = HEIGHT - 3;
+            int usableHeight = HEIGHT - 8;
+            int beforeH = (int) Math.round((before / (double) max) * usableHeight);
+            int afterH = (int) Math.round((after / (double) max) * usableHeight);
+
+            int beforeX = 4;
+            int afterX = beforeX + BAR_W + 6;
+
+            g2.setColor(JBColor.GRAY);
+            g2.fillRect(beforeX, baseline - beforeH, BAR_W, Math.max(1, beforeH));
+            g2.setColor(afterColor);
+            g2.fillRect(afterX, baseline - afterH, BAR_W, Math.max(1, afterH));
+
+            g2.setColor(JBColor.border());
+            g2.drawLine(0, baseline, WIDTH, baseline);
+
+            g2.dispose();
+        }
     }
 
     /**

@@ -971,6 +971,17 @@ public class ExtractMethodEngine {
             // with anything nested arbitrarily deep inside loop bodies,
             // if-blocks, or blocks within blocks.
             locallyAvailable.addAll(PsiTreeUtil.findChildrenOfType(stmt, PsiLocalVariable.class));
+            // FIX (found live, EvenCountDemo test -- immediately after the
+            // previous fix): findChildrenOfType only searches DESCENDANTS
+            // of the element passed in, never the element itself. When the
+            // matched shared block's foreach loop IS one of the top-level
+            // statements being scanned (stmt == the PsiForeachStatement
+            // itself, not a container holding one), the recursive search
+            // below alone finds nothing -- it's looking for a loop nested
+            // INSIDE this loop, not this loop itself. Restoring an
+            // explicit self-check alongside the recursive one (for a
+            // foreach loop genuinely nested inside another matched
+            // statement, e.g. a loop within a loop) covers both cases.
             if (stmt instanceof PsiForeachStatement selfFe) {
                 locallyAvailable.add(selfFe.getIterationParameter());
             }
@@ -1571,6 +1582,25 @@ public class ExtractMethodEngine {
         PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
         if (psiFile == null) return false;
 
+        if (!isPullUpApplicable(psiFile, canonical, duplicate)) return false;
+
+        pullUp(targetFile, canonical, duplicate, cloneTypeLabel, onComplete);
+        return true;
+    }
+
+    /**
+     * Read-only check: would tryPullUpIfApplicable() actually route this
+     * pair to Pull Up Method, without performing any refactor or touching
+     * the file. Exists specifically so UI code building a button label
+     * ahead of time (e.g. CloneGuardToolWindowFactory, deciding whether to
+     * show "Extract \u2192" or "Pull Up \u2192" BEFORE the user clicks) can ask
+     * this exact question cheaply and correctly, instead of the button
+     * label being a guess that the click can silently contradict. Kept in
+     * lock-step with tryPullUpIfApplicable() by having that method call
+     * this one rather than each maintaining its own copy of the check.
+     */
+    public boolean isPullUpApplicable(PsiFile psiFile, String canonical, String duplicate) {
+        if (psiFile == null) return false;
         final String canonicalName = canonical;
         final String duplicateName = duplicate;
         Boolean applicable = ReadAction.compute(() -> {
@@ -1586,11 +1616,19 @@ public class ExtractMethodEngine {
             if (superA == null || superB == null || !superA.equals(superB)) return false;
             return !"java.lang.Object".equals(superA.getQualifiedName());
         });
+        return Boolean.TRUE.equals(applicable);
+    }
 
-        if (!Boolean.TRUE.equals(applicable)) return false;
-
-        pullUp(targetFile, canonical, duplicate, cloneTypeLabel, onComplete);
-        return true;
+    /**
+     * Convenience overload for UI code that only has a VirtualFile handy
+     * (e.g. computing a button label before the file is necessarily open
+     * in an editor), matching the same VirtualFile-vs-editor convention
+     * already used by the extract()/delegate()/pullUp() family above.
+     */
+    public boolean isPullUpApplicable(VirtualFile targetFile, String canonical, String duplicate) {
+        if (targetFile == null || !targetFile.isValid()) return false;
+        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
+        return isPullUpApplicable(psiFile, canonical, duplicate);
     }
 
     public void pullUp(String canonical, String duplicate, String cloneTypeLabel, java.util.function.Consumer<PsiFile> onComplete) {

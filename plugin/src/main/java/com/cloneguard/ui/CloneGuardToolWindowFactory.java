@@ -7,8 +7,10 @@ import com.cloneguard.services.FileScannerService;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ReadAction;
 import com.intellij.openapi.editor.Editor;
+import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.*;
 import com.intellij.psi.*;
 import com.intellij.ui.JBColor;
@@ -246,15 +248,33 @@ class ScanResultsPanel {
 
         card.add(info, BorderLayout.CENTER);
 
-        // Right: Refactor button — label reflects which technique will
-        // likely be used. Note this label is a best-guess hint shown
-        // BEFORE the click: Type 1/2 groups show "Extract →" here, but
-        // triggerRefactor() may still silently upgrade the actual refactor
-        // applied to Pull Up Method if the pair turns out to be in sibling
-        // subclasses — see triggerRefactor() below for why the label
-        // can't know that in advance without doing the same PSI work the
-        // click itself does.
-        String btnLabel = (group.cloneType == CloneType.TYPE_4) ? "Delegate →" : "Extract →";
+        // Right: Refactor button — label now reflects the ACTUAL technique
+        // that will run, computed via the same read-only check
+        // triggerRefactor() uses at click-time (isPullUpApplicable()), not
+        // a guess. Previously this always showed "Extract \u2192" for Type
+        // 1/2/3 groups even when the pair qualified for Pull Up, which the
+        // click would then silently perform anyway — correct behavior,
+        // misleading label. Computing it here instead keeps the label and
+        // the actual action in lock-step.
+        String btnLabel;
+        if (group.cloneType == CloneType.TYPE_4) {
+            btnLabel = "Delegate →";
+        } else {
+            com.cloneguard.refactor.ExtractMethodEngine labelEngine =
+                    com.cloneguard.refactor.ExtractMethodEngine.getInstance(project);
+            // Same lookup triggerRefactor()'s no-file overload of
+            // tryPullUpIfApplicable() relies on internally — "whatever
+            // file is currently focused in the editor" — so the label
+            // and the actual click-time behavior are always asking the
+            // exact same question, not two different ones.
+            Editor selectedEditor = FileEditorManager.getInstance(project).getSelectedTextEditor();
+            VirtualFile currentFile = (selectedEditor != null)
+                    ? FileDocumentManager.getInstance().getFile(selectedEditor.getDocument())
+                    : null;
+            boolean wouldPullUp = currentFile != null
+                    && labelEngine.isPullUpApplicable(currentFile, group.methods.get(0), group.methods.get(1));
+            btnLabel = wouldPullUp ? "Pull Up →" : "Extract →";
+        }
         JButton refactorBtn = new JButton(btnLabel);
         refactorBtn.setBackground(typeColor(group.cloneType));
         refactorBtn.setForeground(Color.WHITE);
