@@ -12,5 +12,19 @@
     "pullUpCount": 0,
     "pushDownCount": 0,
     "understandAvailable": false
+  },
+  {
+    "timestamp": 1785782767610,
+    "fileName": "TaxCalculator.java",
+    "source": "github_pr",
+    "pullRequestNumber": 20,
+    "locBefore": 28,
+    "locAfter": 25,
+    "duplicatedLinesEliminated": 3,
+    "extractCount": 1,
+    "delegateCount": 0,
+    "pullUpCount": 0,
+    "pushDownCount": 0,
+    "understandAvailable": false
   }
 ]
