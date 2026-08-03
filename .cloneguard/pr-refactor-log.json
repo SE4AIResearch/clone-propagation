@@ -1,0 +1,16 @@
+[
+  {
+    "timestamp": 1785781791326,
+    "fileName": "SumSquaresDemo.java",
+    "source": "github_pr",
+    "pullRequestNumber": 19,
+    "locBefore": 17,
+    "locAfter": 17,
+    "duplicatedLinesEliminated": 0,
+    "extractCount": 1,
+    "delegateCount": 0,
+    "pullUpCount": 0,
+    "pushDownCount": 0,
+    "understandAvailable": false
+  }
+]

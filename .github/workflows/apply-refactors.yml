@@ -369,6 +369,56 @@ jobs:
               for idx, a, b, reason in skipped:
                   body += f"- ⏭️ #{idx} `{a}()` ↔ `{b}()`: {reason}\n"
           body += "\nA fresh scan will run automatically on this push -- check back for an updated checklist."
+
+          # NEW (Scenario 3 dashboard, no-IDE version): a real dashboard
+          # rendered directly in the PR comment itself -- built from the
+          # SAME pr_log_entries this run just wrote, plus existing_entries
+          # (the full accumulated history across every /refactor comment
+          # ever resolved in this repo, already loaded and merged a few
+          # lines above when the log file was written). Deliberately
+          # entirely self-contained here: a reviewer sees real, current
+          # numbers on the PR itself, with no dependency on anyone having
+          # CloneGuard open locally, or even having the plugin installed
+          # at all -- this is the direct answer to "no IDE involved".
+          #
+          # SciTools Understand metrics (CC/WMC/CBO/DIT/NOC) are
+          # explicitly and honestly NOT shown here, for the same reason
+          # they're left out of pr_log_entries above: Understand isn't
+          # installed/licensed on this GitHub Actions runner, and showing
+          # fabricated numbers instead of an honest gap would be worse
+          # than not showing this section at all.
+          this_pr_files = len(pr_log_entries)
+          this_pr_loc_before = sum(e["locBefore"] for e in pr_log_entries)
+          this_pr_loc_after = sum(e["locAfter"] for e in pr_log_entries)
+          this_pr_lines_eliminated = sum(e["duplicatedLinesEliminated"] for e in pr_log_entries)
+          this_pr_extract = sum(e["extractCount"] for e in pr_log_entries)
+          this_pr_delegate = sum(e["delegateCount"] for e in pr_log_entries)
+
+          project_total_refactors = sum(e["extractCount"] + e["delegateCount"] for e in existing_entries)
+          project_total_lines_eliminated = sum(e["duplicatedLinesEliminated"] for e in existing_entries)
+          project_files_touched = len({e["fileName"] for e in existing_entries})
+          project_prs_involved = len({e["pullRequestNumber"] for e in existing_entries})
+
+          body += "\n\n---\n"
+          body += "### 📊 CloneGuard Dashboard — this Pull Request\n\n"
+          body += "| Metric | Value |\n|---|---|\n"
+          body += f"| Files changed | {this_pr_files} |\n"
+          body += f"| Lines of code (before → after) | {this_pr_loc_before} → {this_pr_loc_after} |\n"
+          body += f"| Duplicated lines eliminated | {this_pr_lines_eliminated} |\n"
+          body += f"| Extract Method applied | {this_pr_extract} |\n"
+          body += f"| Method Delegation applied | {this_pr_delegate} |\n"
+
+          body += "\n### 📈 CloneGuard Dashboard — project-wide (via GitHub Pull Requests)\n\n"
+          body += "| Metric | Value |\n|---|---|\n"
+          body += f"| Total refactors applied via `/refactor` | {project_total_refactors} |\n"
+          body += f"| Total duplicated lines eliminated | {project_total_lines_eliminated} |\n"
+          body += f"| Files touched (all time) | {project_files_touched} |\n"
+          body += f"| Pull Requests involved | {project_prs_involved} |\n"
+
+          body += ("\n*Cyclomatic Complexity, WMC, Coupling, and Inheritance metrics aren't available in this "
+                    "environment (SciTools Understand isn't installed on this runner) -- open the file locally in "
+                    "IntelliJ with CloneGuard for the full metric set.*")
+
           gh_request(f"https://api.github.com/repos/{REPO}/issues/{PR_NUMBER}/comments",
                      method="POST", body={"body": body})
           print(f"Applied {len(applied)}, skipped {len(skipped)}.")
