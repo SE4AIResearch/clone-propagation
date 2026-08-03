@@ -394,11 +394,6 @@ jobs:
           this_pr_extract = sum(e["extractCount"] for e in pr_log_entries)
           this_pr_delegate = sum(e["delegateCount"] for e in pr_log_entries)
 
-          project_total_refactors = sum(e["extractCount"] + e["delegateCount"] for e in existing_entries)
-          project_total_lines_eliminated = sum(e["duplicatedLinesEliminated"] for e in existing_entries)
-          project_files_touched = len({e["fileName"] for e in existing_entries})
-          project_prs_involved = len({e["pullRequestNumber"] for e in existing_entries})
-
           body += "\n\n---\n"
           body += "### 📊 CloneGuard Dashboard — this Pull Request\n\n"
           body += "| Metric | Value |\n|---|---|\n"
@@ -407,13 +402,6 @@ jobs:
           body += f"| Duplicated lines eliminated | {this_pr_lines_eliminated} |\n"
           body += f"| Extract Method applied | {this_pr_extract} |\n"
           body += f"| Method Delegation applied | {this_pr_delegate} |\n"
-
-          body += "\n### 📈 CloneGuard Dashboard — project-wide (via GitHub Pull Requests)\n\n"
-          body += "| Metric | Value |\n|---|---|\n"
-          body += f"| Total refactors applied via `/refactor` | {project_total_refactors} |\n"
-          body += f"| Total duplicated lines eliminated | {project_total_lines_eliminated} |\n"
-          body += f"| Files touched (all time) | {project_files_touched} |\n"
-          body += f"| Pull Requests involved | {project_prs_involved} |\n"
 
           body += ("\n*Cyclomatic Complexity, WMC, Coupling, and Inheritance metrics aren't available in this "
                     "environment (SciTools Understand isn't installed on this runner) -- open the file locally in "
