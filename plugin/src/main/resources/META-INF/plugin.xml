@@ -112,6 +112,13 @@
         <projectService
             serviceImplementation="com.cloneguard.services.MetricsTrackerService"/>
 
+        <!-- NEW (Scenario 3 dashboard support): imports GitHub PR-sourced
+             refactor sessions into the Trend Dashboard once per project
+             open — see CloneGuardStartupActivity's own javadoc for why
+             this runs at startup rather than on every dashboard refresh. -->
+        <postStartupActivity
+            implementation="com.cloneguard.startup.CloneGuardStartupActivity"/>
+
     </extensions>
 
     <actions>
@@ -127,6 +134,16 @@
                     text="Scan Current File"
                     description="Scan the current file for all 4 clone types">
                 <keyboard-shortcut keymap="$default" first-keystroke="shift ctrl G"/>
+            </action>
+
+            <!-- NEW: project-wide scan support, professor-requested —
+                 scans every Java file in the project together, rather
+                 than requiring "Scan Current File" once per file. -->
+            <action id="CloneGuard.ScanProject"
+                    class="com.cloneguard.ui.ScanProjectAction"
+                    text="Scan Entire Project"
+                    description="Scan every Java file in the project together for all 4 clone types">
+                <keyboard-shortcut keymap="$default" first-keystroke="shift ctrl alt G"/>
             </action>
 
             <action id="CloneGuard.IndexFile"

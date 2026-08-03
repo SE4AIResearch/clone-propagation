@@ -7,7 +7,10 @@ import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.editor.ScrollType;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.*;
+import com.intellij.psi.search.FileTypeIndex;
+import com.intellij.psi.search.GlobalSearchScope;
 import com.intellij.psi.util.PsiTreeUtil;
 
 import java.util.*;
@@ -21,6 +24,83 @@ public final class FileScannerService {
 
     public FileScannerService(Project project) {
         this.project = project;
+    }
+
+    /**
+     * NEW (project-wide scan support): scans every Java file in the
+     * project TOGETHER, rather than one file in isolation via
+     * scanFile() above. "Together" here means each file is still sent
+     * to the detection server as its own individual request -- clone
+     * detection is inherently a within-file operation in this codebase
+     * (see scanFile()'s own doc: functions extracted from ONE psiFile),
+     * and that scope was a deliberate choice made earlier in this
+     * project, not something this method changes. What "together" means
+     * concretely is that the RESULTS are gathered and returned as one
+     * combined project-wide picture, rather than requiring the user to
+     * manually run Scan Current File once per file and lose the
+     * cross-file overview in between.
+     *
+     * Returns a map from each scanned PsiFile to whatever clone groups
+     * scanFile() found in it -- files with zero clones are still present
+     * in the map with an empty list, so a caller can tell "scanned,
+     * found nothing" apart from "wasn't scanned at all" (e.g. a file
+     * with fewer than 2 functions, which scanFile() already skips).
+     */
+    /**
+     * Combined result for one file from a project-wide scan: both its
+     * clone groups AND its Push Down candidates, mirroring exactly what
+     * ScanFileAction already gathers per-file (scanFile() +
+     * findPushDownCandidates() called together) -- scanProject() should
+     * produce the same combined picture per file, just looped across
+     * every file in the project instead of one at a time.
+     */
+    public static class FileScanResult {
+        public final List<CloneGroup> cloneGroups;
+        public final List<PushDownCandidate> pushDownCandidates;
+
+        public FileScanResult(List<CloneGroup> cloneGroups, List<PushDownCandidate> pushDownCandidates) {
+            this.cloneGroups = cloneGroups;
+            this.pushDownCandidates = pushDownCandidates;
+        }
+    }
+
+    public Map<PsiFile, FileScanResult> scanProject() {
+        Map<PsiFile, FileScanResult> results = new LinkedHashMap<>();
+        Collection<VirtualFile> javaFiles = FileTypeIndex.getFiles(
+                com.intellij.ide.highlighter.JavaFileType.INSTANCE,
+                GlobalSearchScope.projectScope(project));
+
+        LOG.info("CloneGuard: project-wide scan starting, " + javaFiles.size() + " Java file(s) found");
+
+        int fileIndex = 0;
+        for (VirtualFile vf : javaFiles) {
+            fileIndex++;
+            PsiFile psiFile = PsiManager.getInstance(project).findFile(vf);
+            if (psiFile == null) continue;
+            LOG.info("CloneGuard: project scan " + fileIndex + "/" + javaFiles.size() + " — " + psiFile.getName());
+
+            // FIX (found live, testing this session): the original
+            // version of this method only called scanFile() -- clone-pair
+            // detection -- and never called findPushDownCandidates() at
+            // all, unlike ScanFileAction (the single-file scan), which
+            // already correctly calls both. Confirmed directly: a project
+            // scan against a file with a genuine, real Push Down
+            // candidate (a method on a superclass used by only one
+            // subclass) silently found nothing for it, while the same
+            // file's Pull Up-shaped clone was correctly detected. Both
+            // checks now run for every file, matching ScanFileAction's
+            // existing combined behavior exactly.
+            List<CloneGroup> groups = scanFile(psiFile);
+            List<PushDownCandidate> pushDownCandidates = findPushDownCandidates(psiFile);
+            results.put(psiFile, new FileScanResult(groups, pushDownCandidates));
+        }
+
+        int totalClones = results.values().stream().mapToInt(r -> r.cloneGroups.size()).sum();
+        int totalPushDown = results.values().stream().mapToInt(r -> r.pushDownCandidates.size()).sum();
+        LOG.info("CloneGuard: project-wide scan complete — " + results.size() + " file(s) scanned, "
+                + totalClones + " total clone group(s), " + totalPushDown + " total push-down candidate(s) found across the project");
+
+        return results;
     }
 
     public List<CloneGroup> scanFile(PsiFile psiFile) {

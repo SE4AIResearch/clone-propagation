@@ -492,4 +492,163 @@ public final class MetricsTrackerService {
         }
         return sessions;
     }
+
+    /**
+     * NEW (project-wide dashboard support): averages the Understand
+     * metrics across every file in the project that has at least one
+     * recorded session, using each file's MOST RECENT session only --
+     * same "point-in-time snapshot, not a running total" philosophy
+     * already used for the single-file dashboard's latest-session row
+     * (see the class-level javadoc above). A file with no sessions at
+     * all, or whose latest session has understandAvailable == false,
+     * is excluded from the average entirely rather than silently
+     * counted as zero -- a file Understand never successfully analyzed
+     * has no real number to contribute, and averaging in a zero would
+     * misrepresent the whole project's actual complexity as lower than
+     * it is.
+     */
+    public ProjectMetricsAverage getProjectAverageMetrics() {
+        List<RefactorSession> all = loadAllSessions();
+        // Latest session per file, in the order each file's last session
+        // was recorded -- a simple LinkedHashMap-free approach using a
+        // plain loop, since sessions are already stored oldest-first and
+        // a later entry for the same fileName just overwrites the
+        // earlier one as we walk through.
+        java.util.Map<String, RefactorSession> latestPerFile = new java.util.LinkedHashMap<>();
+        for (RefactorSession s : all) {
+            latestPerFile.put(s.fileName, s);
+        }
+
+        List<RefactorSession> usable = new ArrayList<>();
+        for (RefactorSession s : latestPerFile.values()) {
+            if (s.understandAvailable) usable.add(s);
+        }
+
+        ProjectMetricsAverage avg = new ProjectMetricsAverage();
+        avg.fileCount = latestPerFile.size();
+        avg.filesWithUnderstandData = usable.size();
+        for (String fn : latestPerFile.keySet()) {
+            avg.allFileNames.add(fn);
+        }
+        for (RefactorSession s : usable) {
+            avg.includedFileNames.add(s.fileName);
+        }
+        if (usable.isEmpty()) return avg;
+
+        long ccBeforeSum = 0, ccAfterSum = 0, wmcBeforeSum = 0, wmcAfterSum = 0;
+        long cboBeforeSum = 0, cboAfterSum = 0, ditBeforeSum = 0, ditAfterSum = 0;
+        long nocBeforeSum = 0, nocAfterSum = 0, locBeforeSum = 0, locAfterSum = 0;
+        for (RefactorSession s : usable) {
+            ccBeforeSum += s.complexityBefore;
+            ccAfterSum += s.complexityAfter;
+            wmcBeforeSum += s.wmcBefore;
+            wmcAfterSum += s.wmcAfter;
+            cboBeforeSum += s.cboBefore;
+            cboAfterSum += s.cboAfter;
+            ditBeforeSum += s.ditBefore;
+            ditAfterSum += s.ditAfter;
+            nocBeforeSum += s.nocBefore;
+            nocAfterSum += s.nocAfter;
+            locBeforeSum += s.locBefore;
+            locAfterSum += s.locAfter;
+        }
+        int n = usable.size();
+        avg.ccBefore = ccBeforeSum / (double) n;
+        avg.ccAfter = ccAfterSum / (double) n;
+        avg.wmcBefore = wmcBeforeSum / (double) n;
+        avg.wmcAfter = wmcAfterSum / (double) n;
+        avg.cboBefore = cboBeforeSum / (double) n;
+        avg.cboAfter = cboAfterSum / (double) n;
+        avg.ditBefore = ditBeforeSum / (double) n;
+        avg.ditAfter = ditAfterSum / (double) n;
+        avg.nocBefore = nocBeforeSum / (double) n;
+        avg.nocAfter = nocAfterSum / (double) n;
+        avg.locBefore = locBeforeSum / (double) n;
+        avg.locAfter = locAfterSum / (double) n;
+        return avg;
+    }
+
+    /** Plain result holder for getProjectAverageMetrics() above. */
+    public static class ProjectMetricsAverage {
+        public int fileCount;
+        public int filesWithUnderstandData;
+        // NEW (professor-requested follow-up): the actual file names
+        // behind each count above -- fileCount alone doesn't tell a
+        // viewer WHICH files were included, and if only 3 of 4 files
+        // in the project actually contributed to the average, that's
+        // meaningfully different information from just "3 of 4".
+        public List<String> allFileNames = new ArrayList<>();
+        public List<String> includedFileNames = new ArrayList<>();
+        public double ccBefore, ccAfter;
+        public double wmcBefore, wmcAfter;
+        public double cboBefore, cboAfter;
+        public double ditBefore, ditAfter;
+        public double nocBefore, nocAfter;
+        public double locBefore, locAfter;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // SCENARIO 3 SUPPORT — merging in sessions recorded by GitHub's
+    // apply-refactors.yml workflow, so a Pull Request refactor shows up
+    // on the same dashboard as local IDE refactors.
+    // ─────────────────────────────────────────────────────────────────
+    //
+    // GitHub Actions has no way to reach into a running IntelliJ
+    // instance -- there may not even BE one open when a PR gets its
+    // /refactor comment resolved. Instead, apply-refactors.yml commits a
+    // small JSON log file directly into the repo alongside the code fix
+    // it applies (see PR_METRICS_LOG for the expected path). This method
+    // reads that file, if present, and merges its entries into the same
+    // persisted-sessions log this service already reads from --
+    // deliberately NOT a separate storage mechanism, so loadAllSessions()
+    // and getProjectAverageMetrics() automatically include PR-sourced
+    // data with no separate merge step needed anywhere else.
+    //
+    // Called once per IDE session start (see CloneGuardStartupActivity,
+    // or wherever this project wires up plugin startup) rather than on
+    // every dashboard refresh, since it involves a file read and should
+    // only pick up genuinely NEW entries since the last time this ran.
+    private static final String PR_METRICS_LOG = ".cloneguard/pr-refactor-log.json";
+
+    public synchronized void importGithubPrSessionsIfPresent() {
+        try {
+            String basePath = project.getBasePath();
+            if (basePath == null) return;
+            Path prLogPath = Paths.get(basePath, PR_METRICS_LOG);
+            if (!Files.exists(prLogPath)) return;
+
+            List<RefactorSession> prSessions = new ArrayList<>();
+            String content = Files.readString(prLogPath, StandardCharsets.UTF_8);
+            RefactorSession[] parsed = gson.fromJson(content, RefactorSession[].class);
+            if (parsed != null) {
+                for (RefactorSession s : parsed) {
+                    if (s != null) prSessions.add(s);
+                }
+            }
+            if (prSessions.isEmpty()) return;
+
+            // Avoid re-importing the same PR sessions on every startup:
+            // only persist entries whose (timestamp, fileName,
+            // pullRequestNumber) triple isn't already present in the
+            // existing log. Simple linear dedup check -- this log is
+            // expected to stay small (one entry per successfully
+            // resolved /refactor comment), so an O(n*m) check here is a
+            // non-issue in practice.
+            List<RefactorSession> existing = loadAllSessions();
+            for (RefactorSession incoming : prSessions) {
+                boolean alreadyPresent = existing.stream().anyMatch(e ->
+                        e.timestamp == incoming.timestamp
+                                && java.util.Objects.equals(e.fileName, incoming.fileName)
+                                && e.pullRequestNumber == incoming.pullRequestNumber);
+                if (!alreadyPresent) {
+                    incoming.source = "github_pr";
+                    persistSession(incoming);
+                }
+            }
+        } catch (IOException e) {
+            LOG.warn("CloneGuard: failed to import GitHub PR session log: " + e.getMessage());
+        } catch (Exception e) {
+            LOG.warn("CloneGuard: could not parse GitHub PR session log (malformed JSON?): " + e.getMessage());
+        }
+    }
 }

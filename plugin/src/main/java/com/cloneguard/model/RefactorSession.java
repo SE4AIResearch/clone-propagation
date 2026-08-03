@@ -84,6 +84,27 @@ public class RefactorSession {
     // file.
     public boolean understandAvailable;
 
+    // NEW (Scenario 3 dashboard support): where this session came from --
+    // "ide" for a normal local scan/refactor cycle (the only kind that
+    // existed before), or "github_pr" for one recorded by
+    // apply-refactors.yml after a /refactor comment on a Pull Request.
+    // Defaults to "ide" via the constructor below so every session
+    // persisted before this field existed still deserializes correctly
+    // (Gson leaves unset fields at their Java default, but an explicit
+    // default here is more honest than relying on that implicitly).
+    // The dashboard uses this to visually tag GitHub-sourced entries
+    // rather than silently mixing them in as if they were identical --
+    // a PR-based session has no locally-observed Understand "before" in
+    // the same sense an IDE session does, so keeping the source visible
+    // matters for reading the chart correctly.
+    public String source = "ide";
+
+    // NEW (Scenario 3 dashboard support): the originating Pull Request
+    // number, only meaningful when source is "github_pr" -- lets the
+    // dashboard link back to the actual PR a given data point came from.
+    // Left at 0 for ordinary IDE sessions.
+    public int pullRequestNumber;
+
     public RefactorSession() {
         // Required by Gson for deserialization.
     }

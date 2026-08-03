@@ -99,6 +99,25 @@ public class CloneGuardToolWindowFactory implements ToolWindowFactory {
         }
     }
 
+    /**
+     * NEW (project-wide scan support): counterpart to
+     * refreshTrendDashboard() above, called by ScanProjectAction once a
+     * whole-project scan finishes -- shows the tool window and switches
+     * the Trend Dashboard straight to its "Whole Project (Average)" view
+     * rather than a specific file's trend, since that's the view a
+     * project-wide scan's results actually belong in.
+     */
+    public static void refreshTrendDashboardProjectAverage(Project project) {
+        ToolWindow toolWindow = ToolWindowManager.getInstance(project).getToolWindow("CloneGuard");
+        if (toolWindow != null) {
+            toolWindow.show();
+            toolWindow.activate(null);
+        }
+        if (trendDashboardPanel != null) {
+            trendDashboardPanel.reloadProjectAverage();
+        }
+    }
+
     public static void showResults(Project project, List<CloneGroup> groups, List<PushDownCandidate> pushDownCandidates, String fileName) {
         ToolWindow toolWindow = ToolWindowManager.getInstance(project).getToolWindow("CloneGuard");
         if (toolWindow != null) {

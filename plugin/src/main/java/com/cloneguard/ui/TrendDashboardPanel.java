@@ -44,6 +44,12 @@ public class TrendDashboardPanel {
     private final JLabel fileLabel;
     private final JLabel summaryLabel;
     private final ChartPanel chartPanel;
+    private JPanel locCard;
+    // NEW (project-wide dashboard support): tracks whether the toggle in
+    // the top bar is currently set to "Whole Project (Average)" rather
+    // than "This File" -- checked by the Refresh button so it re-runs
+    // whichever view is actually showing.
+    private boolean viewingProjectAverage = false;
     private final JPanel breakdownContainer;
     private final JPanel cloneTypeBreakdownContainer;
     private final JPanel understandMetricsContainer;
@@ -80,8 +86,31 @@ public class TrendDashboardPanel {
 
         topBar.add(topBarText, BorderLayout.WEST);
 
+        // NEW (project-wide dashboard support): toggle between the
+        // existing per-file trend view (unchanged) and a new project-wide
+        // average view. Deliberately a separate reload path
+        // (reloadProjectAverage() below) rather than folding this into
+        // reload() itself -- reload()'s existing per-file logic has
+        // several already-tested branches (empty state, missing
+        // Understand data, etc.) that don't need to be touched or
+        // risked just to add a second view mode alongside them.
+        JPanel viewModePanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
+        viewModePanel.setOpaque(false);
+        ButtonGroup viewModeGroup = new ButtonGroup();
+        JToggleButton thisFileToggle = new JToggleButton("This File", true);
+        JToggleButton projectToggle = new JToggleButton("Whole Project (Average)");
+        viewModeGroup.add(thisFileToggle);
+        viewModeGroup.add(projectToggle);
+        thisFileToggle.addActionListener(e -> { viewingProjectAverage = false; reload(); });
+        projectToggle.addActionListener(e -> { viewingProjectAverage = true; reloadProjectAverage(); });
+        viewModePanel.add(thisFileToggle);
+        viewModePanel.add(projectToggle);
+        topBar.add(viewModePanel, BorderLayout.CENTER);
+
         JButton refreshBtn = new JButton("Refresh");
-        refreshBtn.addActionListener(e -> reload());
+        refreshBtn.addActionListener(e -> {
+            if (viewingProjectAverage) reloadProjectAverage(); else reload();
+        });
         topBar.add(refreshBtn, BorderLayout.EAST);
 
         root.add(topBar, BorderLayout.NORTH);
@@ -90,17 +119,47 @@ public class TrendDashboardPanel {
         centerPanel.setLayout(new BoxLayout(centerPanel, BoxLayout.Y_AXIS));
         centerPanel.setBorder(new EmptyBorder(8, 12, 8, 12));
 
-        JLabel chartLabel = new JLabel("Lines of code — before vs after each session");
-        chartLabel.setFont(chartLabel.getFont().deriveFont(Font.BOLD, 12f));
-        chartLabel.setBorder(new EmptyBorder(0, 0, 6, 0));
-        chartLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        centerPanel.add(chartLabel);
+        // FIX (professor-flagged): the LOC chart used to be a large
+        // standalone panel (400x220) at the top, with the five Understand
+        // metrics crammed into a small FlowLayout row of tiny 56x30 chips
+        // underneath -- a real visual imbalance, since LOC read as "the
+        // important one" purely by size while five equally meaningful
+        // metrics looked like an afterthought. Restructured into a single
+        // GridLayout(2, 3) of six EQUALLY-SIZED cards -- LOC plus all
+        // five Understand metrics -- so every metric gets the same visual
+        // weight. LOC keeps its own multi-session ChartPanel internally
+        // (it's the one metric tracked across every session, not just
+        // latest-session before/after), just resized to match the other
+        // five cards instead of dominating the section.
+        JLabel metricsLabel = new JLabel("Trend metrics");
+        metricsLabel.setFont(metricsLabel.getFont().deriveFont(Font.BOLD, 12f));
+        metricsLabel.setBorder(new EmptyBorder(0, 0, 6, 0));
+        metricsLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        centerPanel.add(metricsLabel);
 
+        understandStatusLabel = new JLabel(" ");
+        understandStatusLabel.setForeground(JBColor.GRAY);
+        understandStatusLabel.setFont(understandStatusLabel.getFont().deriveFont(Font.ITALIC, 12f));
+        understandStatusLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        centerPanel.add(understandStatusLabel);
+
+        understandMetricsContainer = new JPanel(new GridLayout(2, 3, 12, 12));
+        understandMetricsContainer.setAlignmentX(Component.LEFT_ALIGNMENT);
+        understandMetricsContainer.setOpaque(false);
+
+        JPanel locCardBuild = new JPanel(new BorderLayout());
+        locCardBuild.setOpaque(false);
+        JLabel locTitle = new JLabel("Lines of code (all sessions)");
+        locTitle.setFont(locTitle.getFont().deriveFont(Font.BOLD, 11f));
+        locTitle.setBorder(new EmptyBorder(0, 0, 4, 0));
+        locCardBuild.add(locTitle, BorderLayout.NORTH);
         chartPanel = new ChartPanel();
-        chartPanel.setPreferredSize(new Dimension(400, 220));
-        chartPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 220));
-        chartPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        centerPanel.add(chartPanel);
+        chartPanel.setPreferredSize(new Dimension(METRIC_CARD_WIDTH, METRIC_CARD_HEIGHT));
+        locCardBuild.add(chartPanel, BorderLayout.CENTER);
+        this.locCard = locCardBuild;
+        understandMetricsContainer.add(locCard);
+
+        centerPanel.add(understandMetricsContainer);
 
         centerPanel.add(Box.createVerticalStrut(14));
 
@@ -130,29 +189,9 @@ public class TrendDashboardPanel {
 
         centerPanel.add(Box.createVerticalStrut(14));
 
-        // NEW: Understand-derived OO metrics section (WMC, CBO, DIT,
-        // NOC), plus a status label that's shown instead of the chips
-        // whenever the most recent session didn't have Understand data.
-        JLabel understandLabel = new JLabel("Understand metrics (latest session)");
-        understandLabel.setFont(understandLabel.getFont().deriveFont(Font.BOLD, 12f));
-        understandLabel.setBorder(new EmptyBorder(0, 0, 6, 0));
-        understandLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        centerPanel.add(understandLabel);
-
-        understandStatusLabel = new JLabel(" ");
-        understandStatusLabel.setForeground(JBColor.GRAY);
-        understandStatusLabel.setFont(understandStatusLabel.getFont().deriveFont(Font.ITALIC, 12f));
-        understandStatusLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        centerPanel.add(understandStatusLabel);
-
-        understandMetricsContainer = new JPanel(new FlowLayout(FlowLayout.LEFT, 14, 0));
-        understandMetricsContainer.setAlignmentX(Component.LEFT_ALIGNMENT);
-        understandMetricsContainer.setOpaque(false);
-        centerPanel.add(understandMetricsContainer);
-
         // NEW: always-visible legend spelling out each metric's full name
-        // and a one-line explanation -- the chips above stay short (CC,
-        // WMC, LOC...) so the row itself stays compact and readable, but
+        // and a one-line explanation -- the cards above stay short (CC,
+        // WMC, LOC...) so the grid itself stays compact and readable, but
         // the full meaning is always visible here rather than hidden
         // behind a hover tooltip a first-time viewer might never
         // discover.
@@ -169,6 +208,14 @@ public class TrendDashboardPanel {
 
         reload();
     }
+
+    // Shared target size for every card in the metrics grid -- LOC's
+    // chart and each Understand metric's bar-pair card all render into
+    // exactly this footprint, which is the whole point of the fix: no
+    // metric reads as "more important" than another purely because its
+    // panel happens to be bigger.
+    private static final int METRIC_CARD_WIDTH = 240;
+    private static final int METRIC_CARD_HEIGHT = 170;
 
     public JPanel getRoot() {
         return root;
@@ -328,11 +375,20 @@ public class TrendDashboardPanel {
         // "refactors applied" does). Falls back to a clear status
         // message rather than showing misleading zeros if Understand
         // wasn't reachable when that session was recorded.
+        //
+        // FIX (professor-flagged layout pass): understandMetricsContainer
+        // now also holds the LOC card (see constructor), so removeAll()
+        // here would wipe that out too if not re-added immediately below.
+        // Also: when Understand data isn't available, five empty
+        // placeholder cards are added rather than leaving the grid with
+        // just one filled cell -- keeps the 2x3 grid looking intentional
+        // and consistent in EITHER state, not just when data is present.
         RefactorSession latest = sessions.get(sessions.size() - 1);
         understandMetricsContainer.removeAll();
+        understandMetricsContainer.add(locCard);
         if (latest.understandAvailable) {
             understandStatusLabel.setText(" ");
-            // Each chip below gets a short one-line tooltip explaining
+            // Each card below gets a short one-line tooltip explaining
             // what the metric means -- hover to see it, since six
             // acronyms in a row means nothing to a first-time viewer.
             understandMetricsContainer.add(understandBarChip("CC", latest.complexityBefore, latest.complexityAfter, new Color(99, 90, 197),
@@ -349,6 +405,9 @@ public class TrendDashboardPanel {
             understandStatusLabel.setText(
                     "Understand not available for the most recent session — install and license SciTools Understand, "
                             + "with 'und' on your PATH, to see WMC/CBO/DIT/NOC here.");
+            for (String metricName : new String[]{"CC", "WMC", "CBO", "DIT", "NOC"}) {
+                understandMetricsContainer.add(unavailableMetricCard(metricName));
+            }
         }
         understandMetricsContainer.revalidate();
         understandMetricsContainer.repaint();
@@ -361,6 +420,121 @@ public class TrendDashboardPanel {
         centerPanel.repaint();
         root.revalidate();
         root.repaint();
+    }
+
+    /**
+     * NEW (project-wide dashboard support): the "Whole Project (Average)"
+     * counterpart to reload() above. Reads MetricsTrackerService's
+     * getProjectAverageMetrics() (averages the latest recorded session
+     * per file, across every file in the project that has Understand
+     * data) and renders the same six-card grid layout reload() uses --
+     * same visual language, so switching the toggle doesn't feel like a
+     * different tool, just a different scope. The LOC card and the
+     * refactor-type/clone-type breakdown rows below it are intentionally
+     * left showing the last-loaded per-file data rather than also being
+     * reimplemented as project-wide aggregates -- those breakdowns are
+     * naturally cumulative counts already tracked per file, and a
+     * genuinely project-wide version of THOSE specifically would need
+     * its own separate design pass, out of scope for this change.
+     */
+    public void reloadProjectAverage() {
+        // NEW (professor-requested follow-up): show the ACTUAL project
+        // name here, not a generic "Whole Project" label -- matters once
+        // someone has multiple projects open across different windows,
+        // so this dashboard is unambiguous about which project's data
+        // it's showing.
+        fileLabel.setText(project.getName() + " (Whole Project Average)");
+
+        MetricsTrackerService.ProjectMetricsAverage avg =
+                MetricsTrackerService.getInstance(project).getProjectAverageMetrics();
+
+        if (avg.filesWithUnderstandData == 0) {
+            summaryLabel.setText(avg.fileCount == 0
+                    ? "No refactor sessions recorded yet anywhere in this project."
+                    : avg.fileCount + " file(s) have recorded sessions, but none have Understand data available yet.");
+            understandMetricsContainer.removeAll();
+            understandMetricsContainer.add(locCard);
+            for (String metricName : new String[]{"CC", "WMC", "CBO", "DIT", "NOC"}) {
+                understandMetricsContainer.add(unavailableMetricCard(metricName));
+            }
+            understandMetricsContainer.revalidate();
+            understandMetricsContainer.repaint();
+            understandStatusLabel.setText(" ");
+            centerPanel.revalidate();
+            centerPanel.repaint();
+            root.revalidate();
+            root.repaint();
+            return;
+        }
+
+        // NEW (professor-requested follow-up): spell out WHICH files
+        // were actually included, not just "3 of 4" -- if a file was
+        // excluded (no Understand data for its latest session), name it
+        // too, so the gap between fileCount and filesWithUnderstandData
+        // is never a mystery the viewer has to go dig for elsewhere.
+        String includedList = String.join(", ", avg.includedFileNames);
+        String summaryText = "Averaged across " + avg.filesWithUnderstandData + " of " + avg.fileCount
+                + " file(s): " + includedList;
+        if (avg.filesWithUnderstandData < avg.fileCount) {
+            java.util.List<String> excluded = new java.util.ArrayList<>(avg.allFileNames);
+            excluded.removeAll(avg.includedFileNames);
+            summaryText += "  (excluded, no Understand data: " + String.join(", ", excluded) + ")";
+        }
+        summaryLabel.setText(summaryText);
+        summaryLabel.setToolTipText(summaryText);
+
+        understandStatusLabel.setText(" ");
+        understandMetricsContainer.removeAll();
+        understandMetricsContainer.add(locCard);
+        understandMetricsContainer.add(averageBarChip("CC", avg.ccBefore, avg.ccAfter, new Color(99, 90, 197),
+                "Average Cyclomatic Complexity (worst method in class) across all files with Understand data."));
+        understandMetricsContainer.add(averageBarChip("WMC", avg.wmcBefore, avg.wmcAfter, new Color(46, 139, 87),
+                "Average Weighted Methods per Class across all files with Understand data."));
+        understandMetricsContainer.add(averageBarChip("CBO", avg.cboBefore, avg.cboAfter, new Color(197, 90, 17),
+                "Average Coupling Between Objects across all files with Understand data."));
+        understandMetricsContainer.add(averageBarChip("DIT", avg.ditBefore, avg.ditAfter, new Color(184, 134, 11),
+                "Average Depth of Inheritance Tree across all files with Understand data."));
+        understandMetricsContainer.add(averageBarChip("NOC", avg.nocBefore, avg.nocAfter, new Color(90, 143, 214),
+                "Average Number of Children across all files with Understand data."));
+        understandMetricsContainer.revalidate();
+        understandMetricsContainer.repaint();
+
+        centerPanel.revalidate();
+        centerPanel.repaint();
+        root.revalidate();
+        root.repaint();
+    }
+
+    /**
+     * Same visual card as understandBarChip(), but for a DOUBLE
+     * before/after pair (an average across files) rather than a single
+     * session's exact int values -- shown with one decimal place so an
+     * average of, say, 7.4 doesn't silently round away from a real 7 or
+     * 8 and look like more precision (or less) than it actually has.
+     */
+    private JPanel averageBarChip(String label, double before, double after, Color color, String tooltip) {
+        JPanel card = new JPanel(new BorderLayout());
+        card.setOpaque(false);
+        card.setToolTipText(tooltip);
+        card.setPreferredSize(new Dimension(METRIC_CARD_WIDTH, METRIC_CARD_HEIGHT));
+
+        JLabel nameLabel = new JLabel(label);
+        nameLabel.setForeground(color);
+        nameLabel.setFont(nameLabel.getFont().deriveFont(Font.BOLD, 11f));
+        nameLabel.setBorder(new EmptyBorder(0, 0, 4, 0));
+        card.add(nameLabel, BorderLayout.NORTH);
+
+        MiniBarPair bars = new MiniBarPair((int) Math.round(before), (int) Math.round(after), color);
+        bars.setToolTipText(tooltip);
+        card.add(bars, BorderLayout.CENTER);
+
+        JLabel valueLabel = new JLabel(String.format("%.1f \u2192 %.1f", before, after), SwingConstants.CENTER);
+        valueLabel.setForeground(JBColor.GRAY);
+        valueLabel.setFont(valueLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        valueLabel.setBorder(new EmptyBorder(4, 0, 0, 0));
+        card.add(valueLabel, BorderLayout.SOUTH);
+
+        return card;
     }
 
     private JLabel breakdownChip(String label, int count, Color color) {
@@ -405,60 +579,84 @@ public class TrendDashboardPanel {
      * latest-session snapshot instead of a multi-session trend line.
      */
     private JPanel understandBarChip(String label, int before, int after, Color color, String tooltip) {
-        JPanel chip = new JPanel();
-        chip.setLayout(new BoxLayout(chip, BoxLayout.Y_AXIS));
-        chip.setOpaque(false);
-        chip.setToolTipText(tooltip);
+        JPanel card = new JPanel(new BorderLayout());
+        card.setOpaque(false);
+        card.setToolTipText(tooltip);
+        card.setPreferredSize(new Dimension(METRIC_CARD_WIDTH, METRIC_CARD_HEIGHT));
 
         JLabel nameLabel = new JLabel(label);
         nameLabel.setForeground(color);
         nameLabel.setFont(nameLabel.getFont().deriveFont(Font.BOLD, 11f));
-        nameLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        chip.add(nameLabel);
+        nameLabel.setBorder(new EmptyBorder(0, 0, 4, 0));
+        card.add(nameLabel, BorderLayout.NORTH);
 
         MiniBarPair bars = new MiniBarPair(before, after, color);
-        bars.setAlignmentX(Component.LEFT_ALIGNMENT);
         bars.setToolTipText(tooltip);
-        chip.add(bars);
+        card.add(bars, BorderLayout.CENTER);
 
-        JLabel valueLabel = new JLabel(before + " \u2192 " + after);
+        JLabel valueLabel = new JLabel(before + " \u2192 " + after, SwingConstants.CENTER);
         valueLabel.setForeground(JBColor.GRAY);
-        valueLabel.setFont(valueLabel.getFont().deriveFont(Font.PLAIN, 10f));
-        valueLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        chip.add(valueLabel);
+        valueLabel.setFont(valueLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        valueLabel.setBorder(new EmptyBorder(4, 0, 0, 0));
+        card.add(valueLabel, BorderLayout.SOUTH);
 
-        return chip;
+        return card;
     }
 
     /**
-     * Tiny custom-painted paired-bar widget: "before" (muted gray) next
-     * to "after" (the metric's own color), each scaled against this
+     * Placeholder shown in place of a real metric card when the latest
+     * session has no Understand data -- keeps the 2x3 grid's shape
+     * consistent (six cells, always) rather than the layout collapsing
+     * down to a single LOC card with nothing beside it, which would look
+     * broken rather than intentional.
+     */
+    private JPanel unavailableMetricCard(String label) {
+        JPanel card = new JPanel(new BorderLayout());
+        card.setOpaque(false);
+        card.setPreferredSize(new Dimension(METRIC_CARD_WIDTH, METRIC_CARD_HEIGHT));
+
+        JLabel nameLabel = new JLabel(label);
+        nameLabel.setForeground(JBColor.GRAY);
+        nameLabel.setFont(nameLabel.getFont().deriveFont(Font.BOLD, 11f));
+        nameLabel.setBorder(new EmptyBorder(0, 0, 4, 0));
+        card.add(nameLabel, BorderLayout.NORTH);
+
+        JLabel dash = new JLabel("—", SwingConstants.CENTER);
+        dash.setForeground(JBColor.GRAY);
+        dash.setFont(dash.getFont().deriveFont(Font.PLAIN, 20f));
+        card.add(dash, BorderLayout.CENTER);
+
+        return card;
+    }
+
+    /**
+     * Custom-painted paired-bar card: "before" (muted gray) next to
+     * "after" (the metric's own color), each scaled against this
      * metric's own before/after max -- deliberately NOT scaled against
      * the other metrics, since CC and CBO can differ by an order of
      * magnitude and forcing one shared scale would make the smaller
-     * metric's bars unreadably thin. This is a fixed-size decoration
-     * alongside the numeric label, not a general chart component --
-     * matches the scope of the existing LOC chart above, which is also
-     * explicitly documented as deliberately simple rather than a
-     * general-purpose charting widget.
+     * metric's bars unreadably thin.
+     *
+     * FIX (professor-flagged layout pass): this used to be a tiny
+     * 56x30 decoration next to a plain numeric label -- exactly the
+     * "LOC chart big, everything else small" imbalance that was
+     * flagged. Resized to fill the same METRIC_CARD_WIDTH x (roughly
+     * two-thirds of METRIC_CARD_HEIGHT, leaving room for the title and
+     * value labels around it) footprint every other card in the grid
+     * uses, so this reads with the same visual weight as the LOC chart
+     * instead of looking like an afterthought underneath it.
      */
     private static class MiniBarPair extends JPanel {
         private final int before;
         private final int after;
         private final Color afterColor;
-        private static final int WIDTH = 56;
-        private static final int HEIGHT = 30;
-        private static final int BAR_W = 14;
+        private static final int BAR_W = 48;
 
         MiniBarPair(int before, int after, Color afterColor) {
             this.before = before;
             this.after = after;
             this.afterColor = afterColor;
             setOpaque(false);
-            Dimension size = new Dimension(WIDTH, HEIGHT);
-            setPreferredSize(size);
-            setMaximumSize(size);
-            setMinimumSize(size);
         }
 
         @Override
@@ -467,14 +665,18 @@ public class TrendDashboardPanel {
             Graphics2D g2 = (Graphics2D) g.create();
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
+            int width = getWidth();
+            int height = getHeight();
             int max = Math.max(1, Math.max(before, after));
-            int baseline = HEIGHT - 3;
-            int usableHeight = HEIGHT - 8;
+            int baseline = height - 4;
+            int usableHeight = height - 12;
             int beforeH = (int) Math.round((before / (double) max) * usableHeight);
             int afterH = (int) Math.round((after / (double) max) * usableHeight);
 
-            int beforeX = 4;
-            int afterX = beforeX + BAR_W + 6;
+            int gap = 24;
+            int totalBarsWidth = BAR_W * 2 + gap;
+            int beforeX = Math.max(4, (width - totalBarsWidth) / 2);
+            int afterX = beforeX + BAR_W + gap;
 
             g2.setColor(JBColor.GRAY);
             g2.fillRect(beforeX, baseline - beforeH, BAR_W, Math.max(1, beforeH));
@@ -482,9 +684,22 @@ public class TrendDashboardPanel {
             g2.fillRect(afterX, baseline - afterH, BAR_W, Math.max(1, afterH));
 
             g2.setColor(JBColor.border());
-            g2.drawLine(0, baseline, WIDTH, baseline);
+            g2.drawLine(0, baseline, width, baseline);
+
+            // Small "before"/"after" axis labels under each bar, matching
+            // the LOC chart's convention of labeling what's plotted rather
+            // than relying only on the value label below the whole card.
+            g2.setFont(g2.getFont().deriveFont(Font.PLAIN, 9f));
+            g2.setColor(JBColor.GRAY);
+            drawCentered(g2, "before", beforeX + BAR_W / 2, baseline + 12);
+            drawCentered(g2, "after", afterX + BAR_W / 2, baseline + 12);
 
             g2.dispose();
+        }
+
+        private void drawCentered(Graphics2D g2, String text, int centerX, int y) {
+            int textWidth = g2.getFontMetrics().stringWidth(text);
+            g2.drawString(text, centerX - textWidth / 2, y);
         }
     }
 

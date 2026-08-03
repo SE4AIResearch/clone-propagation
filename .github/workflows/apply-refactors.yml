@@ -67,7 +67,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           python3 << 'PYTHON'
-          import os, re, json, subprocess, urllib.request, urllib.error
+          import os, re, json, subprocess, time, urllib.request, urllib.error
 
           GH_TOKEN = os.environ["GH_TOKEN"]
           CLONEGUARD_URL = os.environ.get("CLONEGUARD_URL", "http://localhost:8765")
@@ -182,6 +182,22 @@ jobs:
 
           REPO_ROOT = os.getcwd()  # actions/checkout@v4 already ran -- this IS the repo root
 
+          # NEW (Scenario 3 dashboard support): accumulates one entry per
+          # FILE that actually gets an edit applied below, matching the
+          # shape MetricsTrackerService.importGithubPrSessionsIfPresent()
+          # expects to read on the plugin side (see RefactorSession.java --
+          # source/pullRequestNumber fields added there for exactly this).
+          # Deliberately no Understand metrics here (CC/WMC/CBO/DIT/NOC
+          # all left at their JSON default of 0, understandAvailable left
+          # false) -- SciTools Understand isn't installed/licensed on this
+          # GitHub Actions runner, and reporting fabricated zeros instead
+          # of genuinely missing data would be actively misleading on the
+          # dashboard. LOC before/after is computed directly from this
+          # script's own before/after file content, which costs nothing
+          # extra to capture accurately.
+          PR_METRICS_LOG_PATH = os.path.join(REPO_ROOT, ".cloneguard", "pr-refactor-log.json")
+          pr_log_entries = []
+
           # ── Apply, grouped by file so each file is read/written once ───────
           by_file = {}
           for idx, filepath, name_a, name_b in selected:
@@ -206,6 +222,16 @@ jobs:
                   content = f.read()
               by_name = {fn["name"]: fn for fn in extract_functions(content)}
               edits = []  # (start, end, replacement) -- applied back-to-front so offsets stay valid
+
+              # NEW (Scenario 3 dashboard support): per-file technique
+              # counts, mirroring extractCount/delegateCount on the
+              # RefactorSession model -- Pull Up/Push Down never apply
+              # here, since this workflow only ever proposes Extract
+              # Method or Method Delegation (see the /suggest response
+              # handling below), consistent with the paper's documented
+              # scope for the GitHub PR flow.
+              file_extract_count = 0
+              file_delegate_count = 0
 
               for idx, name_a, name_b in file_groups:
                   if name_a in claimed or name_b in claimed:
@@ -243,18 +269,21 @@ jobs:
                       skipped.append((idx, name_a, name_b, suggestion.get("reason", "no longer applicable")))
                       continue
 
-                  if suggestion.get("technique") == "delegation":
+                  technique = suggestion.get("technique", "extract")
+                  if technique == "delegation":
                       rewritten_name = suggestion.get("rewrites", name_b)
                       target_fn = fn_a if rewritten_name == name_a else fn_b
                       edits.append((target_fn["start"], target_fn["end"], suggestion["newDuplicateBody"]))
+                      file_delegate_count += 1
                   else:
                       edits.append((fn_a["start"], fn_a["end"], suggestion["newCanonicalBody"]))
                       edits.append((fn_b["start"], fn_b["end"],
                                     suggestion["newDuplicateBody"] + "\n\n" + suggestion["helperCode"]))
+                      file_extract_count += 1
 
                   claimed.add(name_a)
                   claimed.add(name_b)
-                  applied.append((idx, name_a, name_b, suggestion.get("technique", "extract"), suggestion.get("note")))
+                  applied.append((idx, name_a, name_b, technique, suggestion.get("note")))
 
               if edits:
                   edits.sort(key=lambda e: e[0], reverse=True)
@@ -264,6 +293,28 @@ jobs:
                   with open(filepath, 'w', encoding='utf-8') as f:
                       f.write(new_content)
 
+                  # NEW (Scenario 3 dashboard support): record this file's
+                  # before/after line counts now, while both versions of
+                  # its content are still in scope -- matches
+                  # RefactorSession.fileName's existing "simple filename"
+                  # convention (os.path.basename, not the full repo-
+                  # relative path), same granularity the plugin side
+                  # already uses everywhere else in MetricsTrackerService.
+                  pr_log_entries.append({
+                      "timestamp": int(time.time() * 1000),
+                      "fileName": os.path.basename(filepath),
+                      "source": "github_pr",
+                      "pullRequestNumber": int(PR_NUMBER),
+                      "locBefore": len(content.splitlines()),
+                      "locAfter": len(new_content.splitlines()),
+                      "duplicatedLinesEliminated": max(0, len(content.splitlines()) - len(new_content.splitlines())),
+                      "extractCount": file_extract_count,
+                      "delegateCount": file_delegate_count,
+                      "pullUpCount": 0,
+                      "pushDownCount": 0,
+                      "understandAvailable": False,
+                  })
+
           if not applied:
               body = "**CloneGuard** — none of the selected clones could be applied:\n\n"
               for idx, a, b, reason in skipped:
@@ -272,6 +323,33 @@ jobs:
                          method="POST", body={"body": body})
               print("Nothing applied.")
               exit(0)
+
+          # NEW (Scenario 3 dashboard support): persist the accumulated
+          # log entries to .cloneguard/pr-refactor-log.json, merging with
+          # whatever's already there rather than overwriting -- this file
+          # is meant to accumulate across every PR that ever runs
+          # /refactor, not just the most recent one. Written and staged
+          # BEFORE the git commit below, in the SAME commit as the code
+          # fix itself, so the plugin-side import (see
+          # MetricsTrackerService.importGithubPrSessionsIfPresent()) has
+          # exactly one place to look, and every historical entry stays
+          # traceable to the commit that produced it.
+          if pr_log_entries:
+              os.makedirs(os.path.dirname(PR_METRICS_LOG_PATH), exist_ok=True)
+              existing_entries = []
+              if os.path.exists(PR_METRICS_LOG_PATH):
+                  try:
+                      with open(PR_METRICS_LOG_PATH, 'r', encoding='utf-8') as f:
+                          existing_entries = json.load(f)
+                      if not isinstance(existing_entries, list):
+                          existing_entries = []
+                  except Exception as e:
+                      print(f"Warning: could not read existing PR metrics log, starting fresh: {e}")
+                      existing_entries = []
+              existing_entries.extend(pr_log_entries)
+              with open(PR_METRICS_LOG_PATH, 'w', encoding='utf-8') as f:
+                  json.dump(existing_entries, f, indent=2)
+              print(f"Recorded {len(pr_log_entries)} new entry/entries to {PR_METRICS_LOG_PATH}")
 
           subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
           subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
