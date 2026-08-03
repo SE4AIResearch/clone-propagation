@@ -104,32 +104,112 @@ public class InlineSuggestionListener implements EditorFactoryListener {
                 String inserted = e.getNewFragment().toString();
 
                 if (inserted.length() > 30 && looksLikeJavaMethod(inserted)) {
-                    // FIX (found live, this session): de-duplicate against
-                    // IntelliJ's own auto-reindent-after-paste re-firing
-                    // this listener with near-identical content moments
-                    // after the real insertion. See field javadoc above for
-                    // the full explanation.
-                    String normalized = inserted.replaceAll("\\s+", " ").trim();
-                    long now = System.currentTimeMillis();
-                    boolean isEcho = normalized.equals(lastHandledNormalized)
-                            && (now - lastHandledAtMillis) < DEDUP_WINDOW_MILLIS;
+                    // FIX (found live, this session): the whole paste used to
+                    // be passed to handleInsertion() as ONE blob regardless
+                    // of how many methods it actually contained. Confirmed
+                    // directly: pasting 4 separate methods at once produced
+                    // NO detection at all, even though 3 of the 4 individual
+                    // pairs were independently confirmed to detect
+                    // correctly on their own -- codeToCheck ended up being
+                    // "4 concatenated methods stuck together", which cannot
+                    // hash-match or embedding-match ANY single existing
+                    // method, since no real method in the file looks like
+                    // that shape. Splitting the paste into its individual
+                    // top-level methods FIRST, and running the exact same
+                    // detection/dedup/handleInsertion flow once per method,
+                    // fixes this without changing behavior at all for the
+                    // (overwhelmingly common) single-method paste case --
+                    // splitIntoMethods() returns a single-element list
+                    // containing the original text unchanged whenever only
+                    // one method is present.
+                    java.util.List<String> pastedMethods = splitIntoMethods(inserted);
 
-                    if (isEcho) {
-                        LOG.info("CloneGuard: skipping duplicate insertion event (likely auto-reindent echo of the same paste)");
-                        return;
+                    for (int methodIdx = 0; methodIdx < pastedMethods.size(); methodIdx++) {
+                        String singleMethod = pastedMethods.get(methodIdx);
+                        if (singleMethod.length() <= 30 || !looksLikeJavaMethod(singleMethod)) continue;
+
+                        String normalized = singleMethod.replaceAll("\\s+", " ").trim();
+                        long now = System.currentTimeMillis();
+                        boolean isEcho = normalized.equals(lastHandledNormalized)
+                                && (now - lastHandledAtMillis) < DEDUP_WINDOW_MILLIS;
+
+                        if (isEcho) {
+                            LOG.info("CloneGuard: skipping duplicate insertion event (likely auto-reindent echo of the same paste)");
+                            continue;
+                        }
+
+                        lastHandledNormalized = normalized;
+                        lastHandledAtMillis = now;
+
+                        LOG.info("CloneGuard: Java method insertion detected, length=" + singleMethod.length()
+                                + (pastedMethods.size() > 1 ? " (method " + (methodIdx + 1)
+                                        + " of " + pastedMethods.size() + " in this paste)" : ""));
+                        handleInsertion(editor, project, singleMethod, e.getOffset());
                     }
-
-                    lastHandledNormalized = normalized;
-                    lastHandledAtMillis = now;
-
-                    LOG.info("CloneGuard: Java method insertion detected, length=" + inserted.length());
-                    handleInsertion(editor, project, inserted, e.getOffset());
                 }
                 // NOTE: Removed scheduleReindex here — only reindex on Cmd+S
             }
         });
 
         scheduleReindex(editor, project);
+    }
+
+    /**
+     * Splits a block of pasted text into its individual top-level Java
+     * methods, so a multi-method paste can be checked method-by-method
+     * instead of as one undifferentiated blob (see the FIX note in
+     * documentChanged() above for why this matters). Uses the same
+     * signature-detection regex as extractMethodNameFromCode(), scanning
+     * repeatedly rather than just once, then brace-matches each
+     * signature's body to find where that method actually ends.
+     * <p>
+     * Returns a single-element list containing the original text
+     * unchanged if zero or one method signature is found -- covers both
+     * the ordinary single-method paste case (should behave identically
+     * to before this fix) and a body-only paste (no visible modifier,
+     * handled entirely separately by the isBodyOnly path in
+     * handleInsertion, which this method deliberately leaves untouched).
+     */
+    private java.util.List<String> splitIntoMethods(String text) {
+        java.util.List<String> methods = new java.util.ArrayList<>();
+        java.util.regex.Matcher sigMatcher = Pattern.compile(
+                "(?:public|private|protected|static|final|\\s)*\\s*(?:\\w+(?:<[^>]*>)?(?:\\[\\])?)\\s+(\\w+)\\s*\\([^)]*\\)\\s*\\{"
+        ).matcher(text);
+
+        java.util.List<Integer> signatureStarts = new java.util.ArrayList<>();
+        while (sigMatcher.find()) {
+            signatureStarts.add(sigMatcher.start());
+        }
+
+        if (signatureStarts.size() <= 1) {
+            methods.add(text);
+            return methods;
+        }
+
+        for (int i = 0; i < signatureStarts.size(); i++) {
+            int start = signatureStarts.get(i);
+            int searchEnd = (i + 1 < signatureStarts.size()) ? signatureStarts.get(i + 1) : text.length();
+            int braceIdx = text.indexOf('{', start);
+            if (braceIdx < 0 || braceIdx >= searchEnd) continue;
+
+            int depth = 0;
+            int end = -1;
+            for (int p = braceIdx; p < text.length(); p++) {
+                char c = text.charAt(p);
+                if (c == '{') depth++;
+                else if (c == '}') {
+                    depth--;
+                    if (depth == 0) {
+                        end = p + 1;
+                        break;
+                    }
+                }
+            }
+            if (end == -1) end = text.length();
+            methods.add(text.substring(start, end).trim());
+        }
+
+        return methods.isEmpty() ? java.util.List.of(text) : methods;
     }
 
     @Override
