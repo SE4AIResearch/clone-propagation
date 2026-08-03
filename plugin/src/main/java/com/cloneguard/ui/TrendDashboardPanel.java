@@ -369,30 +369,30 @@ public class TrendDashboardPanel {
         RefactorSession latest = sessions.get(sessions.size() - 1);
         List<CombinedMetricsChartPanel.MetricBar> bars = new java.util.ArrayList<>();
         bars.add(new CombinedMetricsChartPanel.MetricBar("LOC", latest.locBefore, latest.locAfter,
-                new Color(90, 90, 90), true, "Lines of Code in the file."));
+                true, "Lines of Code in the file."));
         if (latest.understandAvailable) {
             understandStatusLabel.setText(" ");
             bars.add(new CombinedMetricsChartPanel.MetricBar("CC", latest.complexityBefore, latest.complexityAfter,
-                    new Color(99, 90, 197), true,
+                    true,
                     "Cyclomatic Complexity (worst method in the class): number of independent decision paths through it."));
             bars.add(new CombinedMetricsChartPanel.MetricBar("WMC", latest.wmcBefore, latest.wmcAfter,
-                    new Color(46, 139, 87), true,
+                    true,
                     "Weighted Methods per Class: sum of every method's complexity in the class."));
             bars.add(new CombinedMetricsChartPanel.MetricBar("CBO", latest.cboBefore, latest.cboAfter,
-                    new Color(197, 90, 17), true,
+                    true,
                     "Coupling Between Objects: how many other classes this class references."));
             bars.add(new CombinedMetricsChartPanel.MetricBar("DIT", latest.ditBefore, latest.ditAfter,
-                    new Color(184, 134, 11), true,
+                    true,
                     "Depth of Inheritance Tree: how many levels up the class hierarchy this class sits."));
             bars.add(new CombinedMetricsChartPanel.MetricBar("NOC", latest.nocBefore, latest.nocAfter,
-                    new Color(90, 143, 214), true,
+                    true,
                     "Number of Children: how many other classes directly extend this class."));
         } else {
             understandStatusLabel.setText(
                     "Understand not available for the most recent session — install and license SciTools Understand, "
                             + "with 'und' on your PATH, to see WMC/CBO/DIT/NOC here.");
             for (String metricName : new String[]{"CC", "WMC", "CBO", "DIT", "NOC"}) {
-                bars.add(new CombinedMetricsChartPanel.MetricBar(metricName, 0, 0, JBColor.GRAY, false, null));
+                bars.add(new CombinedMetricsChartPanel.MetricBar(metricName, 0, 0, false, null));
             }
         }
         combinedMetricsChart.setMetrics(bars);
@@ -438,9 +438,9 @@ public class TrendDashboardPanel {
                     ? "No refactor sessions recorded yet anywhere in this project."
                     : avg.fileCount + " file(s) have recorded sessions, but none have Understand data available yet.");
             List<CombinedMetricsChartPanel.MetricBar> emptyBars = new java.util.ArrayList<>();
-            emptyBars.add(new CombinedMetricsChartPanel.MetricBar("LOC", 0, 0, JBColor.GRAY, false, null));
+            emptyBars.add(new CombinedMetricsChartPanel.MetricBar("LOC", 0, 0, false, null));
             for (String metricName : new String[]{"CC", "WMC", "CBO", "DIT", "NOC"}) {
-                emptyBars.add(new CombinedMetricsChartPanel.MetricBar(metricName, 0, 0, JBColor.GRAY, false, null));
+                emptyBars.add(new CombinedMetricsChartPanel.MetricBar(metricName, 0, 0, false, null));
             }
             combinedMetricsChart.setMetrics(emptyBars);
             understandStatusLabel.setText(" ");
@@ -470,16 +470,16 @@ public class TrendDashboardPanel {
         understandStatusLabel.setText(" ");
         List<CombinedMetricsChartPanel.MetricBar> avgBars = new java.util.ArrayList<>();
         avgBars.add(new CombinedMetricsChartPanel.MetricBar("LOC", avg.locBefore, avg.locAfter,
-                new Color(90, 90, 90), true, "Average Lines of Code across all files with recorded sessions."));
-        avgBars.add(new CombinedMetricsChartPanel.MetricBar("CC", avg.ccBefore, avg.ccAfter, new Color(99, 90, 197), true,
+                true, "Average Lines of Code across all files with recorded sessions."));
+        avgBars.add(new CombinedMetricsChartPanel.MetricBar("CC", avg.ccBefore, avg.ccAfter, true,
                 "Average Cyclomatic Complexity (worst method in class) across all files with Understand data."));
-        avgBars.add(new CombinedMetricsChartPanel.MetricBar("WMC", avg.wmcBefore, avg.wmcAfter, new Color(46, 139, 87), true,
+        avgBars.add(new CombinedMetricsChartPanel.MetricBar("WMC", avg.wmcBefore, avg.wmcAfter, true,
                 "Average Weighted Methods per Class across all files with Understand data."));
-        avgBars.add(new CombinedMetricsChartPanel.MetricBar("CBO", avg.cboBefore, avg.cboAfter, new Color(197, 90, 17), true,
+        avgBars.add(new CombinedMetricsChartPanel.MetricBar("CBO", avg.cboBefore, avg.cboAfter, true,
                 "Average Coupling Between Objects across all files with Understand data."));
-        avgBars.add(new CombinedMetricsChartPanel.MetricBar("DIT", avg.ditBefore, avg.ditAfter, new Color(184, 134, 11), true,
+        avgBars.add(new CombinedMetricsChartPanel.MetricBar("DIT", avg.ditBefore, avg.ditAfter, true,
                 "Average Depth of Inheritance Tree across all files with Understand data."));
-        avgBars.add(new CombinedMetricsChartPanel.MetricBar("NOC", avg.nocBefore, avg.nocAfter, new Color(90, 143, 214), true,
+        avgBars.add(new CombinedMetricsChartPanel.MetricBar("NOC", avg.nocBefore, avg.nocAfter, true,
                 "Average Number of Children across all files with Understand data."));
         combinedMetricsChart.setMetrics(avgBars);
 
@@ -668,35 +668,61 @@ public class TrendDashboardPanel {
      * LOC plus the five Understand metrics -- into ONE grouped bar
      * chart, replacing the previous 2x3 grid of six separate cards.
      * Each metric gets its own "group" along the x-axis, with a
-     * before (muted gray) and after (the metric's own color) bar pair,
-     * scaled to THAT metric's own before/after max -- deliberately NOT
-     * one shared y-axis scale across every group, since LOC (tens) and
-     * DIT (typically 0-3) differ by an order of magnitude or more; a
-     * single shared scale would make the smaller metrics' bars
-     * invisible. Each group is still visually equal-width, so no
-     * metric reads as more or less important than another purely by
-     * space allocated to it -- the actual professor-flagged complaint
-     * this whole layout has been iterating on. A metric marked
+     * before/after bar pair, scaled to THAT metric's own before/after
+     * max -- deliberately NOT one shared y-axis scale across every
+     * group, since LOC (tens) and DIT (typically 0-3) differ by an
+     * order of magnitude or more; a single shared scale would make the
+     * smaller metrics' bars invisible. Each group is still visually
+     * equal-width, so no metric reads as more or less important than
+     * another purely by space allocated to it. A metric marked
      * unavailable (no Understand data) renders as a dash in its group
      * instead of bars, rather than being silently dropped from the
      * chart entirely -- keeps the six-group shape consistent whether
      * or not Understand data exists.
+     *
+     * FIX (professor-flagged, second follow-up round): every metric's
+     * "after" bar used to get its OWN color (purple for CC, green for
+     * WMC, orange for CBO...) -- explicitly flagged as reading more
+     * like a web dashboard than an IntelliJ-native panel. Color now
+     * means exactly one thing across the whole chart: gray = Before,
+     * ACCENT_COLOR = After, for every single group, no exceptions.
+     * Metric IDENTITY is still communicated the same way it always
+     * was -- the label under each group (LOC, CC, WMC...) -- so nothing
+     * about which metric is which was lost, only the redundant/noisy
+     * per-metric color coding. A small directional indicator (\u2193/\u2191/=)
+     * is drawn above each group's value text, communicating improved-
+     * vs-increased-vs-unchanged directly rather than asking the viewer
+     * to infer it by comparing two bar heights themselves.
      */
     private static class CombinedMetricsChartPanel extends JPanel {
+
+        // Single shared accent color for every "after" bar, matching
+        // IntelliJ's own platform blue rather than an arbitrary
+        // web-dashboard palette -- see the class javadoc above for why
+        // this replaced six separate per-metric colors.
+        // Single shared accent color for every "after" bar -- green
+        // (matching one of the professor's own suggested options: "Gray
+        // = Before, Blue (or Green) = After") rather than an arbitrary
+        // per-metric palette. Reuses the exact same green already used
+        // elsewhere on this panel for "improved" states, so green
+        // consistently means "the current/after state" across the
+        // whole dashboard rather than introducing a second unrelated
+        // color convention.
+        private static final Color AFTER_COLOR = new JBColor(new Color(46, 160, 90), new Color(90, 200, 130));
+        private static final Color IMPROVED_COLOR = new JBColor(new Color(46, 160, 90), new Color(90, 200, 130));
+        private static final Color INCREASED_COLOR = new JBColor(new Color(214, 100, 40), new Color(230, 140, 80));
 
         static class MetricBar {
             final String label;
             final double before;
             final double after;
-            final Color color;
             final boolean available;
             final String tooltip;
 
-            MetricBar(String label, double before, double after, Color color, boolean available, String tooltip) {
+            MetricBar(String label, double before, double after, boolean available, String tooltip) {
                 this.label = label;
                 this.before = before;
                 this.after = after;
-                this.color = color;
                 this.available = available;
                 this.tooltip = tooltip;
             }
@@ -767,11 +793,53 @@ public class TrendDashboardPanel {
 
                 g2.setColor(JBColor.GRAY);
                 g2.fillRect(beforeX, baseline - beforeH, barW, Math.max(1, beforeH));
-                g2.setColor(m.color);
+                g2.setColor(AFTER_COLOR);
                 g2.fillRect(afterX, baseline - afterH, barW, Math.max(1, afterH));
 
+                // Directional indicator now drawn BESIDE the metric name
+                // (same line, e.g. "LOC \u2193 Improved") rather than
+                // floating above the bars on its own -- keeps the chart
+                // area itself purely about the bars, with all text
+                // (identity + direction) living together in one label
+                // row underneath. A decrease reads as "Improved" for
+                // every one of these metrics (less code, less
+                // complexity, less coupling), so a plain down-arrow is
+                // unambiguous without needing per-metric logic -- an
+                // increase uses neutral language ("Increased", not
+                // "Worsened"), since DIT/NOC growing isn't inherently
+                // bad the way CC/WMC/CBO/LOC growing would be; the arrow
+                // states the direction as a fact, the viewer draws their
+                // own conclusion for those two specifically.
+                String indicator;
+                Color indicatorColor;
+                if (m.after < m.before) {
+                    indicator = "\u2193 Improved";
+                    indicatorColor = IMPROVED_COLOR;
+                } else if (m.after > m.before) {
+                    indicator = "\u2191 Increased";
+                    indicatorColor = INCREASED_COLOR;
+                } else {
+                    indicator = "= Unchanged";
+                    indicatorColor = JBColor.GRAY;
+                }
+
+                Font boldFont = g2.getFont().deriveFont(Font.BOLD, 11f);
+                Font indicatorFont = g2.getFont().deriveFont(Font.PLAIN, 10f);
+                g2.setFont(boldFont);
+                int labelWidth = g2.getFontMetrics().stringWidth(m.label);
+                g2.setFont(indicatorFont);
+                int indicatorWidth = g2.getFontMetrics().stringWidth(indicator);
+                int labelGap = 5;
+                int combinedWidth = labelWidth + labelGap + indicatorWidth;
+                int labelStartX = groupCenterX - combinedWidth / 2;
+
+                g2.setFont(boldFont);
                 g2.setColor(JBColor.foreground());
-                drawCentered(g2, m.label, groupCenterX, baseline + 14);
+                g2.drawString(m.label, labelStartX, baseline + 14);
+
+                g2.setFont(indicatorFont);
+                g2.setColor(indicatorColor);
+                g2.drawString(indicator, labelStartX + labelWidth + labelGap, baseline + 14);
 
                 g2.setFont(g2.getFont().deriveFont(Font.PLAIN, 9f));
                 g2.setColor(JBColor.GRAY);
