@@ -12,5 +12,19 @@
     "pullUpCount": 0,
     "pushDownCount": 0,
     "understandAvailable": false
+  },
+  {
+    "timestamp": 1785884497167,
+    "fileName": "LcmDemo.java",
+    "source": "github_pr",
+    "pullRequestNumber": 24,
+    "locBefore": 23,
+    "locAfter": 17,
+    "duplicatedLinesEliminated": 6,
+    "extractCount": 0,
+    "delegateCount": 1,
+    "pullUpCount": 0,
+    "pushDownCount": 0,
+    "understandAvailable": false
   }
 ]
