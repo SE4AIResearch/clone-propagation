@@ -2430,7 +2430,8 @@ def scan_file():
 
     def is_refactor_wrapper(code):
         """
-        Broader than is_delegation_wrapper(): returns True if this method's
+        Broader than is_delegation_wrapper(): returns True if EITHER (a)
+        this method IS itself a CloneGuard-generated helper, or (b) its
         body calls another method, found elsewhere in this same scan
         batch, whose OWN definition is explicitly marked as
         CloneGuard-generated.
@@ -2445,6 +2446,24 @@ def scan_file():
         the naming convention alone can't distinguish from CloneGuard's own
         output.
 
+        FIX (found live, this session -- confirmed via direct log
+        evidence: "parsed clone group: coreDoubleIt <-> coreLastVal
+        (TYPE_3)"): the check above this one only protects a WRAPPER
+        method that CALLS a marked helper -- it did nothing to protect
+        the marked helpers THEMSELVES from being compared against each
+        other, or against some other unrelated method. coreDoubleIt and
+        coreLastVal are two independently-generated helpers, extracted
+        from two entirely separate, unrelated original clone pairs
+        (return x*2 vs. return lst[lst.length-1]) -- their only real
+        similarity is superficial shape (both short, single-statement
+        methods), not shared behavior, which is exactly the kind of
+        coincidence Layer 2's semantic model can over-match on for small
+        methods. A marked helper is inherently a refactor byproduct, not
+        an independent implementation someone wrote on purpose -- so
+        checking whether THIS method's own text carries the marker,
+        before even looking at what it calls, closes this the same way
+        for both directions at once.
+
         Now looks up the actual method being called (by name, within this
         scan batch) and checks whether ITS OWN body starts with the
         explicit "// @CloneGuardGenerated" marker that ExtractMethodEngine
@@ -2454,6 +2473,8 @@ def scan_file():
         a project's own "core"-prefixed methods are never marked this way
         and are correctly left alone.
         """
+        if "@CloneGuardGenerated" in code:
+            return True
         if is_delegation_wrapper(code):
             return True
         body = extract_body_local(code)

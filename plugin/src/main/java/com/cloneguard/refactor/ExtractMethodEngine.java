@@ -326,8 +326,8 @@ public class ExtractMethodEngine {
         // moments earlier.
         PsiDocumentManager.getInstance(project).commitAllDocuments();
 
-        PsiFile psiFile = ReadAction.compute(() -> PsiManager.getInstance(project).findFile(targetFile));
-        if (psiFile == null) {
+        PsiFile initialPsiFile = ReadAction.compute(() -> PsiManager.getInstance(project).findFile(targetFile));
+        if (initialPsiFile == null) {
             showDialog(
                     "Could not read the target file. Make sure it is saved.",
                     "CloneGuard", JOptionPane.WARNING_MESSAGE);
@@ -336,7 +336,53 @@ public class ExtractMethodEngine {
 
         // All PSI reads happen inside this ReadAction — analysis only, no
         // dialogs shown here.
-        ExtractionPlan plan = ReadAction.compute(() -> buildExtractionPlan(psiFile, canonical, duplicate, cloneTypeLabel));
+        ExtractionPlan initialPlan = ReadAction.compute(() -> buildExtractionPlan(initialPsiFile, canonical, duplicate, cloneTypeLabel));
+
+        // FIX (found live, this session — confirmed via direct log
+        // evidence): "Could not find one or both methods" was reported
+        // even though the file's actual text was completely valid Java
+        // with both methods genuinely present — traced to
+        // PsiTreeUtil.findChildrenOfType(psiFile, PsiMethod.class)
+        // returning EMPTY for this file at that moment (confirmed via
+        // FileScannerService's "falling back to regex extraction" log
+        // line firing with no preceding exception, meaning PSI
+        // genuinely had zero methods, not that something threw). That
+        // scanner already has a graceful fallback for exactly this
+        // (regex extraction); this refactor path had none at all,
+        // failing outright on the very first PSI hiccup. Forcing a
+        // fresh PSI re-fetch (dropping resolve caches, re-finding the
+        // file, re-running the exact same analysis once more) covers
+        // the transient case cheaply, without needing to know the
+        // underlying platform-level cause of the staleness. Only
+        // retries for THIS specific failure mode -- an aborted plan for
+        // any other reason (a genuine safety-check failure, mismatched
+        // types, etc.) is real and correct, and retrying it would just
+        // show the same correct rejection twice.
+        //
+        // Uses single-element array holders rather than reassigning
+        // psiFile/plan directly, since plan is captured inside the
+        // WriteCommandAction lambda further down -- Java requires
+        // variables captured by a lambda to be effectively final, which
+        // a direct reassignment here would break.
+        final PsiFile[] psiFileHolder = {initialPsiFile};
+        final ExtractionPlan[] planHolder = {initialPlan};
+        if (initialPlan.aborted && initialPlan.abortMessage != null
+                && initialPlan.abortMessage.contains("Could not find one or both methods")) {
+            PsiFile refreshedPsiFile = ReadAction.compute(() -> {
+                PsiManager.getInstance(project).dropResolveCaches();
+                return PsiManager.getInstance(project).findFile(targetFile);
+            });
+            if (refreshedPsiFile != null) {
+                ExtractionPlan retryPlan = ReadAction.compute(
+                        () -> buildExtractionPlan(refreshedPsiFile, canonical, duplicate, cloneTypeLabel));
+                if (!retryPlan.aborted) {
+                    psiFileHolder[0] = refreshedPsiFile;
+                    planHolder[0] = retryPlan;
+                }
+            }
+        }
+        PsiFile psiFile = psiFileHolder[0];
+        ExtractionPlan plan = planHolder[0];
 
         if (plan.aborted) {
             showDialog( plan.abortMessage, plan.abortTitle, plan.abortMessageType);
