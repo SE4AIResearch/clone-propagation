@@ -1,14 +1,8 @@
 public class LcmDemo {
 
     public int lcmIterative(int a, int b) {
-        int x = a, y = b;
-        while (y != 0) {
-            int t = y;
-            y = x % y;
-            x = t;
-        }
-        return (a * b) / x;
-    }
+    return lcmRecursive(a, b);
+}
 
     public int lcmRecursive(int a, int b) {
         return lcmRecursiveHelper(a, b, a, b);
