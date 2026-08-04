@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -91,12 +92,47 @@ public final class UnderstandMetricsService {
     }
 
     /**
-     * Runs a full create/add/analyze/metrics cycle scoped to a single
-     * file, in a temporary database, and parses the resulting metrics
-     * for that file's class(es). Scoped to one file (rather than the
-     * whole project) specifically to keep this usable during an
-     * interactive scan -- a full-project Understand analysis would be
-     * far too slow to run on every paste or scan action.
+     * FIX (professor-flagged, real UX concern -- confirmed valid):
+     * previously created a brand-new temporary database from scratch on
+     * EVERY single call -- create + add + analyze + settings + metrics,
+     * five full `und` subprocess launches every time, no matter how
+     * many times this ran against the same project. That's the actual
+     * source of the 8-10 second wait: `create` and `settings` are
+     * one-time setup work that was being redone every call for no
+     * reason. Switched to a persistent database stored at
+     * .cloneguard/und-db/analysis.und inside the project (created and
+     * configured ONCE, the first time Understand analysis ever runs for
+     * this project), reused on every subsequent call -- only add,
+     * analyze, and metrics run after that first time, which is the
+     * genuinely necessary work (the file's current content still needs
+     * to be re-registered and re-analyzed every time, since that's what
+     * actually changed), cutting two full subprocess launches off every
+     * call after the first.
+     */
+    private Path getPersistentDbPath() throws IOException {
+        String basePath = project.getBasePath();
+        if (basePath == null) {
+            // No real project root to persist into (e.g. a default/
+            // template project) -- fall back to a one-off temp database
+            // rather than fail outright. Slower, but still correct.
+            Path fallback = Files.createTempFile("cloneguard-und-", ".und");
+            Files.deleteIfExists(fallback);
+            return fallback;
+        }
+        Path dbDir = Paths.get(basePath, ".cloneguard", "und-db");
+        Files.createDirectories(dbDir);
+        return dbDir.resolve("analysis.und");
+    }
+
+    /**
+     * Runs analysis for a single file against the persistent, reused
+     * project database (see getPersistentDbPath() above), and parses
+     * the resulting metrics for that file's class(es). Scoped to one
+     * file being ADDED/ANALYZED at a time (rather than the whole
+     * project every call) specifically to keep this usable during an
+     * interactive scan -- a full-project Understand re-analysis on
+     * every paste or scan action would still be far too slow, even with
+     * the persistent-database fix.
      *
      * Returns null if `und` isn't available or analysis fails; callers
      * must handle that case explicitly rather than assume success.
@@ -106,45 +142,51 @@ public final class UnderstandMetricsService {
             return null;
         }
 
-        Path tempDb = null;
         try {
-            tempDb = Files.createTempFile("cloneguard-und-", ".und");
-            Files.deleteIfExists(tempDb); // und create expects the path not to already exist
-            String dbPath = tempDb.toString();
+            Path db = getPersistentDbPath();
+            String dbPath = db.toString();
+            boolean isFirstRunForThisProject = !Files.exists(db);
 
-            runUnd("create", "-db", dbPath, "-languages", "java");
+            if (isFirstRunForThisProject) {
+                runUnd("create", "-db", dbPath, "-languages", "java");
+                // FIX (found live, this session): "Cyclomatic" is a
+                // per-METHOD-only metric in Understand -- it is
+                // legitimately BLANK on class-level rows, confirmed
+                // directly against real CSV output earlier this session
+                // (LocalCloneDetector's class row had Cyclomatic blank,
+                // SumCyclomatic=46). Reading it directly for a
+                // class-level "CC" figure silently produced 0 every
+                // time, not a genuine zero-complexity result.
+                // MaxCyclomatic (the single most complex method in the
+                // class) IS a valid class-level aggregate, same as
+                // SumCyclomatic -- added here and used instead, below.
+                // This settings call only needs to run ONCE per
+                // database, the same as create -- it's a database-level
+                // configuration, not something that needs redoing per
+                // file.
+                runUnd("settings", "-db", dbPath, "-MetricsMetricsAdd",
+                        "Cyclomatic", "MaxCyclomatic", "SumCyclomatic", "CountClassCoupled",
+                        "MaxInheritanceTree", "CountClassDerived", "CountLineCode");
+            }
+
             runUnd("add", "-db", dbPath, absoluteFilePath);
             runUnd("analyze", "-all", "-db", dbPath);
-            // FIX (found live, this session): "Cyclomatic" is a
-            // per-METHOD-only metric in Understand -- it is legitimately
-            // BLANK on class-level rows, confirmed directly against real
-            // CSV output earlier this session (LocalCloneDetector's class
-            // row had Cyclomatic blank, SumCyclomatic=46). Reading it
-            // directly for a class-level "CC" figure silently produced 0
-            // every time, not a genuine zero-complexity result. MaxCyclomatic
-            // (the single most complex method in the class) IS a valid
-            // class-level aggregate, same as SumCyclomatic -- added here
-            // and used instead, below.
-            runUnd("settings", "-db", dbPath, "-MetricsMetricsAdd",
-                    "Cyclomatic", "MaxCyclomatic", "SumCyclomatic", "CountClassCoupled",
-                    "MaxInheritanceTree", "CountClassDerived", "CountLineCode");
 
             Path csvOut = Files.createTempFile("cloneguard-und-metrics-", ".csv");
-            runUnd("metrics", "-all", "-db", dbPath, csvOut.toString());
-
-            return parseCsvForFile(csvOut, absoluteFilePath);
+            try {
+                runUnd("metrics", "-all", "-db", dbPath, csvOut.toString());
+                return parseCsvForFile(csvOut, absoluteFilePath);
+            } finally {
+                try {
+                    Files.deleteIfExists(csvOut);
+                } catch (IOException ignored) {
+                    // Best-effort cleanup; a leftover temp CSV isn't harmful.
+                }
+            }
 
         } catch (IOException | InterruptedException e) {
             LOG.warn("Understand analysis failed for " + absoluteFilePath, e);
             return null;
-        } finally {
-            if (tempDb != null) {
-                try {
-                    Files.deleteIfExists(tempDb);
-                } catch (IOException ignored) {
-                    // Best-effort cleanup; a leftover temp db isn't harmful.
-                }
-            }
         }
     }
 

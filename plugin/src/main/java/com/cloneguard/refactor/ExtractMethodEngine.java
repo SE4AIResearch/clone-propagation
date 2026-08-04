@@ -326,7 +326,7 @@ public class ExtractMethodEngine {
         // moments earlier.
         PsiDocumentManager.getInstance(project).commitAllDocuments();
 
-        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
+        PsiFile psiFile = ReadAction.compute(() -> PsiManager.getInstance(project).findFile(targetFile));
         if (psiFile == null) {
             showDialog(
                     "Could not read the target file. Make sure it is saved.",
@@ -1063,7 +1063,7 @@ public class ExtractMethodEngine {
 
         PsiDocumentManager.getInstance(project).commitAllDocuments();
 
-        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
+        PsiFile psiFile = ReadAction.compute(() -> PsiManager.getInstance(project).findFile(targetFile));
         if (psiFile == null) {
             showDialog("Could not read the target file. Make sure it is saved.", "CloneGuard", JOptionPane.WARNING_MESSAGE);
             return;
@@ -1579,7 +1579,7 @@ public class ExtractMethodEngine {
         if (targetFile == null || !targetFile.isValid()) return false;
 
         PsiDocumentManager.getInstance(project).commitAllDocuments();
-        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
+        PsiFile psiFile = ReadAction.compute(() -> PsiManager.getInstance(project).findFile(targetFile));
         if (psiFile == null) return false;
 
         if (!isPullUpApplicable(psiFile, canonical, duplicate)) return false;
@@ -1627,7 +1627,17 @@ public class ExtractMethodEngine {
      */
     public boolean isPullUpApplicable(VirtualFile targetFile, String canonical, String duplicate) {
         if (targetFile == null || !targetFile.isValid()) return false;
-        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
+        // FIX (found live, Pull Up demo test): PsiManager.findFile() is a
+        // PSI read and was being called here with no ReadAction wrapper.
+        // This runs synchronously from CloneGuardToolWindowFactory while
+        // building each clone-group card's button label on the EDT,
+        // which is exactly why "Read access is allowed from inside
+        // read-action only" warnings appeared repeatedly right after
+        // every scan -- confirmed by matching the warning's timestamps
+        // against the scan-complete log line. Wrapping the read in
+        // ReadAction.compute() here matches the pattern already used
+        // everywhere else in this file (see tryPullUpIfApplicable above).
+        PsiFile psiFile = ReadAction.compute(() -> PsiManager.getInstance(project).findFile(targetFile));
         return isPullUpApplicable(psiFile, canonical, duplicate);
     }
 
@@ -1662,7 +1672,7 @@ public class ExtractMethodEngine {
 
         PsiDocumentManager.getInstance(project).commitAllDocuments();
 
-        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
+        PsiFile psiFile = ReadAction.compute(() -> PsiManager.getInstance(project).findFile(targetFile));
         if (psiFile == null) {
             showDialog("Could not read the target file. Make sure it is saved.", "CloneGuard", JOptionPane.WARNING_MESSAGE);
             return;
@@ -2010,7 +2020,7 @@ public class ExtractMethodEngine {
 
         PsiDocumentManager.getInstance(project).commitAllDocuments();
 
-        PsiFile psiFile = PsiManager.getInstance(project).findFile(targetFile);
+        PsiFile psiFile = ReadAction.compute(() -> PsiManager.getInstance(project).findFile(targetFile));
         if (psiFile == null) {
             showDialog("Could not read the target file. Make sure it is saved.", "CloneGuard", JOptionPane.WARNING_MESSAGE);
             return;

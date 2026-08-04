@@ -18,3 +18,4 @@ cloneguard_metrics.csv
 plugin/bin/
 .idea/
 .cloneguard/metrics.jsonl
+.cloneguard/und-db/

@@ -10,6 +10,7 @@ import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.openapi.vfs.LocalFileSystem;
 import com.intellij.psi.*;
 import com.intellij.psi.search.FilenameIndex;
 import com.intellij.psi.search.GlobalSearchScope;
@@ -78,6 +79,40 @@ public final class MetricsTrackerService {
     // fields are only meaningful mid-session, and nothing outside this
     // class should be reading partial state.
     private String currentFileName;
+    // FIX (found live, this session -- confirmed via direct ps aux
+    // evidence): the "after" snapshot methods below used to ONLY have
+    // this bare filename string to work with, forcing them to re-find
+    // the file via FilenameIndex.getVirtualFilesByName() -- IntelliJ's
+    // project file INDEX, not a live file handle. Confirmed directly:
+    // right after a refactor writes to disk and a second scan triggers
+    // finalizeCurrentSessionIfDirty(), the index lookup was returning
+    // empty -- zero results, no exception, nothing logged -- meaning
+    // the project's index hadn't caught up with the very-recent write
+    // yet. This is a genuine race between the write and the index
+    // refresh, not something ReadAction wrapping alone can fix, since
+    // the index itself was legitimately stale at the moment of the
+    // query. Storing the ACTUAL VirtualFile handle from startSession()
+    // (when the file was definitely already open and resolvable) and
+    // reusing that same handle directly in the after-snapshot, instead
+    // of re-deriving it from a name search, sidesteps the index
+    // entirely for the common case -- falling back to the old name-
+    // based search only if this direct handle somehow becomes invalid
+    // (e.g. the file was genuinely deleted or renamed mid-session).
+    private VirtualFile currentVirtualFile;
+    // FIX (found live, this session -- confirmed via repeated ps aux
+    // evidence, second occurrence): even the direct VirtualFile handle
+    // above can go stale across a session involving several sequential
+    // refactors, each triggering its own "file saved, reindexing..."
+    // cycle (visible in idea.log) -- IntelliJ can swap in a new
+    // VirtualFile instance across enough of these cycles, silently
+    // invalidating the one captured at session start. Storing the raw
+    // filesystem PATH alongside the VirtualFile handle gives a second,
+    // more robust fallback: LocalFileSystem.refreshAndFindFileByPath()
+    // asks the OS directly for the current file at that path, forcing
+    // VFS to refresh its knowledge of it if needed -- unlike
+    // FilenameIndex, which only reflects whatever the project's index
+    // last knew and can visibly lag behind a very recent write.
+    private String currentFilePath;
     private int currentLocBefore;
     private UnderstandMetricsService.UnderstandMetrics currentMetricsBefore; // null if Understand unavailable
     private int currentExtractCount;
@@ -118,6 +153,8 @@ public final class MetricsTrackerService {
         finalizeCurrentSessionIfDirty();
 
         currentFileName = psiFile.getName();
+        currentVirtualFile = ReadAction.compute(() -> psiFile.isValid() ? psiFile.getVirtualFile() : null);
+        currentFilePath = (currentVirtualFile != null) ? currentVirtualFile.getPath() : null;
         currentLocBefore = countLines(psiFile.getText());
         currentMetricsBefore = analyzeWithUnderstand(psiFile);
         currentExtractCount = 0;
@@ -238,6 +275,8 @@ public final class MetricsTrackerService {
         if (totalRefactors == 0) {
             // Nothing was applied this session — don't log a no-op data point.
             currentFileName = null;
+            currentVirtualFile = null;
+            currentFilePath = null;
             return;
         }
 
@@ -261,12 +300,12 @@ public final class MetricsTrackerService {
         // or deleted mid-session (unlikely, but possible), fall back to
         // the "before" value so net-change calculations read as zero
         // rather than a misleading negative/garbage number.
-        Integer locAfter = tryReadCurrentLineCount(currentFileName);
+        Integer locAfter = tryReadCurrentLineCount(currentFileName, currentVirtualFile, currentFilePath);
         if (locAfter != null) {
             session.locAfter = locAfter;
         }
 
-        UnderstandMetricsService.UnderstandMetrics metricsAfter = tryReadCurrentUnderstandMetrics(currentFileName);
+        UnderstandMetricsService.UnderstandMetrics metricsAfter = tryReadCurrentUnderstandMetrics(currentFileName, currentVirtualFile, currentFilePath);
 
         if (currentMetricsBefore != null && metricsAfter != null) {
             session.understandAvailable = true;
@@ -294,9 +333,11 @@ public final class MetricsTrackerService {
 
         persistSession(session);
         currentFileName = null;
+        currentVirtualFile = null;
+        currentFilePath = null;
     }
 
-    private Integer tryReadCurrentLineCount(String fileName) {
+    private Integer tryReadCurrentLineCount(String fileName, VirtualFile directRef, String filePath) {
         try {
             // Same fix as findByName() -- PsiManager.findFile() and
             // psi.getText() are both PSI reads needing an explicit
@@ -304,7 +345,7 @@ public final class MetricsTrackerService {
             // whole method is fast (no external process involved), so
             // wrapping it all in one ReadAction is safe and simplest.
             return ReadAction.compute(() -> {
-                VirtualFile found = findByName(fileName);
+                VirtualFile found = resolveCurrentFile(fileName, directRef, filePath);
                 if (found == null) return null;
                 PsiFile psi = PsiManager.getInstance(project).findFile(found);
                 return (psi != null) ? countLines(psi.getText()) : null;
@@ -315,7 +356,7 @@ public final class MetricsTrackerService {
         return null;
     }
 
-    private UnderstandMetricsService.UnderstandMetrics tryReadCurrentUnderstandMetrics(String fileName) {
+    private UnderstandMetricsService.UnderstandMetrics tryReadCurrentUnderstandMetrics(String fileName, VirtualFile directRef, String filePath) {
         try {
             // IMPORTANT: only the PSI/index lookup (finding the file,
             // confirming it's still resolvable) happens inside
@@ -339,7 +380,17 @@ public final class MetricsTrackerService {
             // Understand silently analyzed the stale pre-refactor bytes.
             // Explicitly saving the document first guarantees `und` sees
             // the real, current content.
-            VirtualFile foundForSave = ReadAction.compute(() -> findByName(fileName));
+            //
+            // FIX (found live, this session -- confirmed via direct
+            // `ps aux | grep "und add"` evidence across TWO separate
+            // tests, then confirmed resolved via ground-truth
+            // .cloneguard/metrics.jsonl inspection and DIAGNOSTIC
+            // logging that has since been removed once the fix was
+            // confirmed working end to end): see resolveCurrentFile()'s
+            // own javadoc for the full three-tier fallback this now
+            // uses -- a single VirtualFile handle alone wasn't durable
+            // enough across a session with several sequential refactors.
+            VirtualFile foundForSave = ReadAction.compute(() -> resolveCurrentFile(fileName, directRef, filePath));
             if (foundForSave != null) {
                 ApplicationManager.getApplication().invokeAndWait(() -> {
                     Document doc = FileDocumentManager.getInstance().getDocument(foundForSave);
@@ -349,16 +400,16 @@ public final class MetricsTrackerService {
                 });
             }
 
-            String filePath = ReadAction.compute(() -> {
-                VirtualFile found = findByName(fileName);
+            String resolvedPath = ReadAction.compute(() -> {
+                VirtualFile found = resolveCurrentFile(fileName, directRef, filePath);
                 if (found == null) return null;
                 PsiFile psi = PsiManager.getInstance(project).findFile(found);
                 return (psi != null) ? found.getPath() : null;
             });
-            if (filePath == null) return null;
-            return understandService.analyzeFile(filePath);
+            if (resolvedPath == null) return null;
+            return understandService.analyzeFile(resolvedPath);
         } catch (Exception e) {
-            LOG.warn("CloneGuard: could not re-read file for Understand metrics 'after' snapshot: " + e.getMessage());
+            LOG.warn("CloneGuard: could not re-read file for Understand metrics 'after' snapshot: " + e.getMessage(), e);
         }
         return null;
     }
@@ -411,6 +462,42 @@ public final class MetricsTrackerService {
                     project, name, GlobalSearchScope.projectScope(project));
             return found.isEmpty() ? null : found.iterator().next();
         });
+    }
+
+    /**
+     * FIX (found live, this session -- second occurrence, confirmed via
+     * repeated ps aux evidence across two separate tests): resolves the
+     * file being finalized using three tiers, from most to least
+     * reliable, so a single point of staleness in any one of them
+     * doesn't silently fail the whole "after" snapshot:
+     *   1. The direct VirtualFile handle captured in startSession(), if
+     *      it's still valid -- no lookup needed at all, fastest and
+     *      most reliable when it holds.
+     *   2. LocalFileSystem.refreshAndFindFileByPath() using the raw
+     *      filesystem path captured alongside that handle -- asks the
+     *      OS directly for the current file at that path and forces
+     *      VFS to refresh its knowledge of it, bypassing the project
+     *      index entirely. Confirmed to be needed live: a session
+     *      involving several sequential refactors (each triggering its
+     *      own reindex cycle) was enough for tier 1's captured
+     *      VirtualFile to go stale, even though the file's path on disk
+     *      never changed.
+     *   3. findByName()'s FilenameIndex-based search, kept only as a
+     *      last resort for the genuinely rare case where the file was
+     *      actually renamed mid-session and neither of the above can
+     *      possibly still be correct.
+     */
+    private VirtualFile resolveCurrentFile(String fileName, VirtualFile directRef, String filePath) {
+        if (directRef != null && directRef.isValid()) {
+            return directRef;
+        }
+        if (filePath != null) {
+            VirtualFile viaPath = ReadAction.compute(() -> LocalFileSystem.getInstance().refreshAndFindFileByPath(filePath));
+            if (viaPath != null && viaPath.isValid()) {
+                return viaPath;
+            }
+        }
+        return findByName(fileName);
     }
 
     private int countLines(String text) {
