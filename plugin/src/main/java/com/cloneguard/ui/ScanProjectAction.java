@@ -119,6 +119,22 @@ public class ScanProjectAction extends AnAction {
                         }
                     }
 
+                    // FIX (code review, professor-flagged, confirmed
+                    // valid): startSession() only finalizes the
+                    // PREVIOUS file's session as a side effect of
+                    // starting the NEXT one -- exactly as noted in the
+                    // comment above, that's intentional and correct for
+                    // every file except the very LAST one in this loop.
+                    // With nothing calling startSession() again
+                    // afterward, the last file's session was left open
+                    // and unfinalized -- any refactors a user later
+                    // applied to that specific file (without an
+                    // intervening scan of some OTHER file first) would
+                    // silently never get recorded. Finalizing explicitly
+                    // here closes that gap without changing the
+                    // per-file behavior above at all.
+                    tracker.finalizeCurrentSessionIfDirty();
+
                     if (totalClones == 0 && totalPushDown == 0) {
                         summary.append("No clones or push-down candidates found across the project.");
                     } else {

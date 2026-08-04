@@ -192,24 +192,78 @@ public class InlineSuggestionListener implements EditorFactoryListener {
             int braceIdx = text.indexOf('{', start);
             if (braceIdx < 0 || braceIdx >= searchEnd) continue;
 
-            int depth = 0;
-            int end = -1;
-            for (int p = braceIdx; p < text.length(); p++) {
-                char c = text.charAt(p);
-                if (c == '{') depth++;
-                else if (c == '}') {
-                    depth--;
-                    if (depth == 0) {
-                        end = p + 1;
-                        break;
-                    }
-                }
-            }
+            int end = findMatchingCloseBrace(text, braceIdx);
             if (end == -1) end = text.length();
             methods.add(text.substring(start, end).trim());
         }
 
         return methods.isEmpty() ? java.util.List.of(text) : methods;
+    }
+
+    /**
+     * FIX (code review, professor-flagged, confirmed valid): the brace
+     * counter that used to live directly inside splitIntoMethods() above
+     * was a naive char == '{' / char == '}' loop with no awareness of
+     * string literals, char literals, or comments at all. A pasted
+     * method containing something as ordinary as
+     * {@code String s = "}";} would have that brace INSIDE the string
+     * counted as a real closing brace, ending the method's detected
+     * body early and corrupting everything split out after it.
+     * <p>
+     * Scans character by character tracking whether the current
+     * position is inside a double-quoted string, a single-quoted char
+     * literal, a block comment, or a line comment -- braces encountered
+     * in any of those states are ignored entirely, matching how a real
+     * Java parser would treat them. Returns the index one past the
+     * matching closing brace for openBraceIdx, or -1 if the text ends
+     * before a match is found (an incomplete/truncated paste).
+     */
+    private int findMatchingCloseBrace(String text, int openBraceIdx) {
+        int depth = 0;
+        boolean inString = false;
+        boolean inChar = false;
+        boolean inLineComment = false;
+        boolean inBlockComment = false;
+        int n = text.length();
+
+        for (int p = openBraceIdx; p < n; p++) {
+            char c = text.charAt(p);
+            char next = (p + 1 < n) ? text.charAt(p + 1) : '\0';
+
+            if (inLineComment) {
+                if (c == '\n') inLineComment = false;
+                continue;
+            }
+            if (inBlockComment) {
+                if (c == '*' && next == '/') { inBlockComment = false; p++; }
+                continue;
+            }
+            if (inString) {
+                if (c == '\\') { p++; continue; }
+                if (c == '"') inString = false;
+                continue;
+            }
+            if (inChar) {
+                if (c == '\\') { p++; continue; }
+                if (c == '\'') inChar = false;
+                continue;
+            }
+
+            if (c == '/' && next == '/') { inLineComment = true; p++; continue; }
+            if (c == '/' && next == '*') { inBlockComment = true; p++; continue; }
+            if (c == '"') { inString = true; continue; }
+            if (c == '\'') { inChar = true; continue; }
+
+            if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0) {
+                    return p + 1;
+                }
+            }
+        }
+        return -1;
     }
 
     @Override

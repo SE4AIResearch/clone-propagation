@@ -69,6 +69,18 @@ public final class MetricsTrackerService {
     private static final Logger LOG = Logger.getInstance(MetricsTrackerService.class);
     private static final String METRICS_DIR = ".cloneguard";
     private static final String METRICS_FILE = "metrics.jsonl";
+    // FIX (code review, professor-flagged, confirmed valid): this log
+    // had no size cap, truncation, or rotation at all -- over months of
+    // real use it would grow unbounded, and every dashboard refresh
+    // read and JSON-parsed the ENTIRE file every time. Capping at the
+    // most recent 1000 sessions keeps that read bounded and fast
+    // indefinitely, while still keeping far more history than the
+    // dashboard's own trend charts realistically display at once.
+    // Enforced in persistSession() below, checked periodically (not on
+    // every single write) to avoid adding file-size-checking overhead
+    // to every refactor.
+    private static final int MAX_PERSISTED_SESSIONS = 1000;
+    private static final int ROTATION_CHECK_INTERVAL = 20;
 
     private final Project project;
     private final Gson gson = new Gson();
@@ -114,6 +126,7 @@ public final class MetricsTrackerService {
     // last knew and can visibly lag behind a very recent write.
     private String currentFilePath;
     private int currentLocBefore;
+    private int writesSinceLastRotationCheck = 0;
     private UnderstandMetricsService.UnderstandMetrics currentMetricsBefore; // null if Understand unavailable
     private int currentExtractCount;
     private int currentDelegateCount;
@@ -268,7 +281,11 @@ public final class MetricsTrackerService {
         finalizeCurrentSessionIfDirty();
     }
 
-    private void finalizeCurrentSessionIfDirty() {
+    // FIX (compile error, found live): ScanProjectAction now needs to
+    // call this directly after its scan loop finishes (see 2.3's fix
+    // there), which requires cross-class access -- this was private
+    // when every call to it came from within this same class.
+    public void finalizeCurrentSessionIfDirty() {
         if (currentFileName == null) return;
 
         int totalRefactors = currentExtractCount + currentDelegateCount + currentPullUpCount + currentPushDownCount;
@@ -527,8 +544,46 @@ public final class MetricsTrackerService {
             String line = gson.toJson(session) + System.lineSeparator();
             Files.writeString(file, line, StandardCharsets.UTF_8,
                     StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+
+            // FIX (code review, professor-flagged, confirmed valid): no
+            // cap existed before, so this log grew forever. Checked
+            // every ROTATION_CHECK_INTERVAL writes rather than every
+            // single one -- counting lines and rewriting the file is
+            // itself real work, and doing it on every refactor for a
+            // log that's usually well under the cap anyway would be
+            // wasted effort most of the time.
+            writesSinceLastRotationCheck++;
+            if (writesSinceLastRotationCheck >= ROTATION_CHECK_INTERVAL) {
+                writesSinceLastRotationCheck = 0;
+                rotateIfOverCap(file);
+            }
         } catch (IOException e) {
             LOG.warn("CloneGuard: failed to persist refactor session metrics: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Keeps only the most recent MAX_PERSISTED_SESSIONS lines of the
+     * metrics log, dropping the oldest entries first. Reads the whole
+     * file once (unavoidable for a line-oriented JSONL format without
+     * an index), but only actually rewrites it when genuinely over the
+     * cap -- the common case, well under 1000 sessions, does one cheap
+     * line count and returns immediately.
+     */
+    private void rotateIfOverCap(Path file) {
+        try {
+            List<String> lines = Files.readAllLines(file, StandardCharsets.UTF_8);
+            if (lines.size() <= MAX_PERSISTED_SESSIONS) {
+                return;
+            }
+            List<String> trimmed = lines.subList(lines.size() - MAX_PERSISTED_SESSIONS, lines.size());
+            String content = String.join(System.lineSeparator(), trimmed) + System.lineSeparator();
+            Files.writeString(file, content, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            LOG.info("CloneGuard: rotated metrics.jsonl, trimmed to the most recent "
+                    + MAX_PERSISTED_SESSIONS + " sessions (was " + lines.size() + ")");
+        } catch (IOException e) {
+            LOG.warn("CloneGuard: failed to rotate metrics.jsonl: " + e.getMessage());
         }
     }
 

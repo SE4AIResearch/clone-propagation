@@ -798,7 +798,19 @@ public class ExtractMethodEngine {
             helperReturnTypeText = (returnType != null) ? returnType.getPresentableText() : "void";
         }
 
-        String helperText = "private " + helperReturnTypeText + " " + finalHelperName + "(" + paramListText + ") {\n"
+        // FIX (code review, professor-flagged, confirmed valid): the
+        // server used to identify a CloneGuard-generated wrapper purely
+        // by checking whether the CALLING method's body mentions a
+        // "core" + PascalCase method name -- a real false-positive risk
+        // for any project that happens to use that same naming
+        // convention on its own, independently-written helpers. An
+        // explicit marker comment placed directly on the generated
+        // helper's OWN declaration is unambiguous regardless of naming
+        // style: the server now checks whether the CALLED method's
+        // definition carries this exact marker, not whether the
+        // caller's method NAME merely looks like it might be one.
+        String helperText = "// @CloneGuardGenerated\n"
+                + "private " + helperReturnTypeText + " " + finalHelperName + "(" + paramListText + ") {\n"
                 + sharedText + "\n}";
 
         boolean canonicalNeedsCapture = (escapingVarName != null) &&

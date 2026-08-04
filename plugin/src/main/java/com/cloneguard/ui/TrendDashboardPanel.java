@@ -2,6 +2,7 @@ package com.cloneguard.ui;
 
 import com.cloneguard.model.RefactorSession;
 import com.cloneguard.services.MetricsTrackerService;
+import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.components.JBScrollPane;
@@ -236,7 +237,38 @@ public class TrendDashboardPanel {
      * whenever the user clicks Refresh, and automatically right after
      * every scan via setCurrentFile() above.
      */
+    /**
+     * FIX (code review, professor-flagged, confirmed valid): this used
+     * to read every session for the current file directly on the EDT
+     * (loadSessionsForFile() parses .cloneguard/metrics.jsonl in full,
+     * every time this runs) -- fine for a small file today, but with no
+     * cap on how large that log grows over months of use, this was a
+     * genuine, worsening UI-freeze risk. The actual file read now
+     * happens on a background thread; only the resulting Swing updates
+     * (in doReload() below) run on the EDT, which is the only part of
+     * this that's actually required to.
+     */
     public void reload() {
+        if (currentFileName == null) {
+            doReload(List.of());
+            return;
+        }
+        String fileNameSnapshot = currentFileName;
+        ApplicationManager.getApplication().executeOnPooledThread(() -> {
+            List<RefactorSession> sessions = MetricsTrackerService.getInstance(project).loadSessionsForFile(fileNameSnapshot);
+            ApplicationManager.getApplication().invokeLater(() -> {
+                // Guard against a stale background load finishing after
+                // the user already switched to viewing a different
+                // file -- only apply these results if currentFileName
+                // is still the same file this particular load was for.
+                if (fileNameSnapshot.equals(currentFileName)) {
+                    doReload(sessions);
+                }
+            });
+        });
+    }
+
+    private void doReload(List<RefactorSession> sessions) {
         if (currentFileName == null) {
             fileLabel.setText("No file scanned yet");
             summaryLabel.setText("Scan a file to see its trend.");
@@ -257,8 +289,6 @@ public class TrendDashboardPanel {
         }
 
         fileLabel.setText(currentFileName);
-
-        List<RefactorSession> sessions = MetricsTrackerService.getInstance(project).loadSessionsForFile(currentFileName);
 
         if (sessions.isEmpty()) {
             summaryLabel.setText("No refactor sessions recorded yet for this file — apply a refactor, then scan again to see a trend.");
@@ -422,16 +452,33 @@ public class TrendDashboardPanel {
      * genuinely project-wide version of THOSE specifically would need
      * its own separate design pass, out of scope for this change.
      */
+    /**
+     * FIX (code review, professor-flagged, confirmed valid -- same
+     * issue as reload() above, arguably worse here since this reads
+     * EVERY session across the WHOLE project, not just one file's
+     * history): the underlying getProjectAverageMetrics() call reads
+     * and parses the entire metrics.jsonl now happens on a background
+     * thread; only the resulting Swing updates run on the EDT.
+     */
     public void reloadProjectAverage() {
+        ApplicationManager.getApplication().executeOnPooledThread(() -> {
+            MetricsTrackerService.ProjectMetricsAverage avg =
+                    MetricsTrackerService.getInstance(project).getProjectAverageMetrics();
+            ApplicationManager.getApplication().invokeLater(() -> {
+                if (viewingProjectAverage) {
+                    doReloadProjectAverage(avg);
+                }
+            });
+        });
+    }
+
+    private void doReloadProjectAverage(MetricsTrackerService.ProjectMetricsAverage avg) {
         // NEW (professor-requested follow-up): show the ACTUAL project
         // name here, not a generic "Whole Project" label -- matters once
         // someone has multiple projects open across different windows,
         // so this dashboard is unambiguous about which project's data
         // it's showing.
         fileLabel.setText(project.getName() + " (Whole Project Average)");
-
-        MetricsTrackerService.ProjectMetricsAverage avg =
-                MetricsTrackerService.getInstance(project).getProjectAverageMetrics();
 
         if (avg.filesWithUnderstandData == 0) {
             summaryLabel.setText(avg.fileCount == 0

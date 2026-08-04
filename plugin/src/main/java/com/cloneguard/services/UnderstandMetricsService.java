@@ -61,11 +61,26 @@ public final class UnderstandMetricsService {
     // available", because IntelliJ itself never saw that PATH change at
     // all. Rather than rely on bare "und" resolving via PATH, this
     // checks a list of known install locations directly (Understand's
-    // default macOS install path first, then falls back to a bare "und"
-    // in case it genuinely is on PATH for some other reason -- e.g. the
-    // IDE was launched from a terminal with `idea .`).
+    // default install path per OS first, then falls back to a bare
+    // "und" in case it genuinely is on PATH for some other reason --
+    // e.g. the IDE was launched from a terminal with `idea .`).
+    //
+    // FIX (code review, professor-flagged, confirmed valid): this list
+    // used to only have an explicit macOS path -- Windows and Linux
+    // users who hadn't configured their system PATH correctly would hit
+    // the exact same silent "Understand not available" failure the
+    // macOS-specific fix above was written to solve, just unaddressed
+    // for those two platforms. Added SciTools' standard install
+    // locations for both. Trying a Windows .exe path on macOS/Linux (or
+    // vice versa) is harmless -- ProcessBuilder simply fails to launch
+    // it, caught below, and the loop moves on to the next candidate --
+    // so there's no need to detect the current OS first; every
+    // platform's paths can just be listed together.
     private static final String[] UND_CANDIDATE_PATHS = {
             "/Applications/Understand.app/Contents/MacOS/und",
+            "C:\\Program Files\\SciTools\\bin\\pc-win64\\und.exe",
+            "/usr/bin/und",
+            "/opt/scitools/bin/linux64/und",
             "und" // fallback: bare command, relies on PATH being inherited
     };
 

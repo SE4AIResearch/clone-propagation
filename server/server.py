@@ -2419,32 +2419,49 @@ def scan_file():
         )
         return bool(delegation_pattern.match(inner))
 
+    # FIX (code review, professor-flagged, confirmed valid): used to be
+    # keyed purely off a name-pattern guess inside is_refactor_wrapper
+    # itself (any call to something matching "core" + PascalCase). Built
+    # once here instead, keyed by actual function name to actual source
+    # snippet, so is_refactor_wrapper can look up what a called method's
+    # OWN definition actually contains, rather than pattern-matching the
+    # caller's text and hoping the name convention holds.
+    functions_by_name = {fn["name"]: fn["snippet"] for fn in scan_functions}
+
     def is_refactor_wrapper(code):
         """
         Broader than is_delegation_wrapper(): returns True if this method's
-        body calls one of CloneGuard's own generated helper methods.
+        body calls another method, found elsewhere in this same scan
+        batch, whose OWN definition is explicitly marked as
+        CloneGuard-generated.
 
-        Both refactoring techniques the plugin uses always route through a
-        helper named "core" + PascalCase (e.g. coreSumPositives,
-        coreSumPositives2 if a name collision required a suffix) —
-        Method Delegation's output matches is_delegation_wrapper() above
-        (a single-line call, nothing else), but Extract Method's output does
-        NOT — it can keep extra statements that were unique to that specific
-        method (e.g. a preserved println), so the body is no longer a single
-        statement and the narrow pattern above misses it entirely.
+        FIX (code review, professor-flagged, confirmed valid): this used
+        to check whether the body merely CONTAINED a call matching the
+        pattern "core" + PascalCase — e.g. r'\\bcore[A-Z]\\w*\\s*\\('.
+        That's a name-convention guess, not a real signal: a project that
+        happens to use its own "core"-prefixed helper naming (coreCalculation(),
+        coreUpdate(), etc.) would have those legitimate, independently-written
+        methods silently skipped from scanning, a real false-negative risk
+        the naming convention alone can't distinguish from CloneGuard's own
+        output.
 
-        Since we control the naming convention of every helper CloneGuard
-        generates, checking for a call to a core*-named method is a reliable
-        signal that this body is a refactor byproduct, not an independent
-        implementation — regardless of how many other statements remain.
-        Two such wrappers calling DIFFERENT helpers can still look similar
-        to each other structurally/semantically (both are short and mostly
-        boilerplate), which is exactly the false-positive this closes.
+        Now looks up the actual method being called (by name, within this
+        scan batch) and checks whether ITS OWN body starts with the
+        explicit "// @CloneGuardGenerated" marker that ExtractMethodEngine
+        writes directly onto every helper method it generates (see
+        ExtractMethodEngine.java's helperText assembly). This is
+        unambiguous regardless of what the helper happens to be named —
+        a project's own "core"-prefixed methods are never marked this way
+        and are correctly left alone.
         """
         if is_delegation_wrapper(code):
             return True
         body = extract_body_local(code)
-        return bool(re.search(r'\bcore[A-Z]\w*\s*\(', body))
+        for called_name in re.findall(r'\b(\w+)\s*\(', body):
+            callee_snippet = functions_by_name.get(called_name)
+            if callee_snippet and "@CloneGuardGenerated" in callee_snippet:
+                return True
+        return False
 
     # ── Layer 1: Type 1 and Type 2 — all pairs ───────────────────────────────
     for i, fn_i in enumerate(scan_functions):
