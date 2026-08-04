@@ -147,11 +147,49 @@ public class InlineSuggestionListener implements EditorFactoryListener {
                         handleInsertion(editor, project, singleMethod, e.getOffset());
                     }
                 }
+
+                // FIX (found live, this session): looksLikeJavaMethod()
+                // above is deliberately method-shaped -- it requires
+                // "return " or "void " somewhere in the pasted text,
+                // which a plain class declaration (e.g. a new subclass
+                // whose constructor only assigns fields, no explicit
+                // return anywhere) simply doesn't have. Confirmed
+                // directly: pasting a brand-new subclass with a
+                // field-only constructor never reached handleInsertion()
+                // at all, meaning the push-down check inside it (see
+                // that method's own FIX note) never ran either -- not
+                // because push-down detection was broken, but because
+                // this ENTIRELY SEPARATE, earlier gate filtered the
+                // paste out before push-down checking ever got a
+                // chance to run. Push-down relevance is a property of
+                // classes and their hierarchy, not of whether the
+                // pasted text happens to look like a method -- so it
+                // needs its own, independent trigger condition here,
+                // not a dependency on the method-shaped one above.
+                if (inserted.length() > 30 && looksLikeClassDeclaration(inserted)) {
+                    checkForNewPushDownCandidates(editor, project);
+                }
                 // NOTE: Removed scheduleReindex here — only reindex on Cmd+S
             }
         });
 
         scheduleReindex(editor, project);
+    }
+
+    /**
+     * True if the pasted text looks like a Java class (or interface/enum)
+     * declaration -- deliberately much looser than looksLikeJavaMethod()
+     * above, since this only needs to decide "is this worth re-checking
+     * the file's class hierarchy for push-down candidates", not "is this
+     * specific text a method to run clone detection against". A bare
+     * "class Foo {" or "class Foo extends Bar {" is enough; no return
+     * statement or access modifier required, unlike a method.
+     */
+    private boolean looksLikeClassDeclaration(String t) {
+        if (t == null) return false;
+        return Pattern.compile("\\bclass\\s+\\w+").matcher(t).find()
+                || Pattern.compile("\\binterface\\s+\\w+").matcher(t).find()
+                || Pattern.compile("\\benum\\s+\\w+").matcher(t).find();
     }
 
     /**
@@ -299,6 +337,25 @@ public class InlineSuggestionListener implements EditorFactoryListener {
         CloneResult result = CloneIndexService.getInstance(project).detect(project, codeToCheck);
         LOG.info("CloneGuard: detection result: " + result);
 
+        // FIX (found live, this session): Push Down checking used to sit
+        // entirely AFTER the "if (!result.isClone && !result.isAiGenerated)
+        // return;" gate below, alongside the clone-dialog logic it was
+        // originally piggybacking on for cost reasons -- meaning a paste
+        // that was neither a clone NOR flagged as AI-generated returned
+        // out of this method before ever reaching the push-down check at
+        // all. Confirmed directly: pasting a brand-new subclass with no
+        // duplicate method anywhere in it produced zero push-down
+        // checking, even though push-down candidates are a property of
+        // the WHOLE FILE's class hierarchy, not of whether this
+        // particular paste happens to also be a clone. Moved above that
+        // gate so it now runs on every qualifying paste unconditionally,
+        // independent of clone/AI status -- the original performance
+        // rationale (avoid a full-file reference search on every single
+        // paste) still applies just as much to a real, standalone
+        // subclass paste as it does to an unrelated clone paste, so
+        // there's no principled reason to gate one but not the other.
+        checkForNewPushDownCandidates(editor, project);
+
         // Always run AI detection independently — works even on empty index
 
         if (!result.isClone && !result.isAiGenerated) return;
@@ -368,18 +425,14 @@ public class InlineSuggestionListener implements EditorFactoryListener {
                 showRefactorNotification(editor, duplicateMethodName, finalResult);
             }
 
-            // EXTENDED (Scenario 1/3 parity request): Push Down doesn't
-            // have a natural paste trigger the way clone detection does --
-            // it's not about the PASTED code being a duplicate at all, it's
-            // static analysis over the whole file looking for a method
-            // that's misplaced too high in the class hierarchy. Rather than
-            // scan the whole file on EVERY keystroke-adjacent paste (a real
-            // performance concern for Layer 1's <10ms design budget — see
-            // the paper), this deliberately only runs piggybacked on a
-            // paste that ALREADY triggered the more expensive dialog-
-            // showing path above, bounding the added cost to cases where
-            // CloneGuard was already doing non-trivial work regardless.
-            checkForNewPushDownCandidates(editor, project);
+            // NOTE: Push Down checking used to run right here, piggybacked
+            // on this same paste specifically because it already reached
+            // this point (meaning result.isClone or result.isAiGenerated
+            // was true). It now runs unconditionally, earlier in
+            // handleInsertion() -- before the early return above -- so
+            // every qualifying paste gets checked regardless of whether
+            // it also happened to be a clone. See that call site's own
+            // comment for the full reasoning.
         });
     }
 
