@@ -50,7 +50,12 @@ a dedicated tool window with a **Refactor →** button per group.
 
 ### 3. AI-generated code detection
 Separately from clone detection, CloneGuard can flag whether a given block
-of code looks AI-generated, via the server's `/detect-ai` endpoint.
+of code looks AI-generated. This runs as two independent systems, not one
+combined check: the server's `/detect-ai` endpoint (UniXcoder-based) is
+treated as primary whenever it's reachable and confident, and a lighter
+local heuristic (based on identifier length, casing, comments, loop style,
+and method chaining) only decides the outcome when the server is uncertain
+or unreachable.
 
 ### 4. Trend Dashboard
 A second tab in the same tool window shows, per file, how quality has
@@ -58,7 +63,8 @@ actually changed across every refactor you've applied — lines of code
 before/after, which refactoring techniques you've used, which clone types
 you've fixed, and (when SciTools Understand is installed locally) real
 Cyclomatic Complexity, Weighted Methods per Class, Coupling, and
-Inheritance metrics for the file's current state.
+Inheritance metrics for the file's current state. A toggle also switches
+to a whole-project average across every file with recorded history.
 
 ---
 
@@ -129,16 +135,20 @@ needed for that one.
 
 | Type | Description | Method |
 |------|-------------|--------|
-| Type 1 | Exact duplicate, whitespace aside | Layer 1 — local, normalized Karp-Rabin hash |
-| Type 2 | Identical structure, renamed identifiers | Layer 1 — local, normalized identifier hash |
+| Type 1 | Exact duplicate, whitespace aside | Layer 1 — local, SHA-256 content hash |
+| Type 2 | Identical structure, renamed identifiers | Layer 1 — local, `VAR`/`FUNC`-normalized identifier hash |
 | Type 3 | Near-miss — same core logic, minor differences | Layer 2 — server, CodeBERT + FAISS |
 | Type 4 | Semantic clone — same intent, different implementation | Layer 2 — server, CodeBERT + FAISS |
 
 Type 1/2 run entirely inside the IDE process, no network call — this is
-what makes the paste-time check fast enough to run interactively. Type 3/4
-are sent to the detection server's `/scan` (full-file) or `/check`
-(single-paste) endpoints, which run both layers internally and return
-final clone groups.
+what makes the paste-time check fast enough to run interactively. For Type
+1, the method body is whitespace-normalized and hashed directly. For Type
+2, every identifier is replaced with one of two placeholder tokens
+depending on how it's used — `VAR` for a variable reference, `FUNC` for an
+identifier immediately followed by `(` — before hashing, so a renamed copy
+still collapses to the same hash as the original. Type 3/4 are sent to the
+detection server's `/scan` (full-file) or `/check` (single-paste)
+endpoints, which run both layers internally and return final clone groups.
 
 ### The detection server
 
@@ -162,15 +172,20 @@ shows exactly what it's about to do before applying it.
 
 | Technique | Applies when |
 |-----------|--------------|
-| **Extract Method** | Two methods in the same class share a literal block of statements (Type 1/2/3) |
+| **Extract Method** | Two methods in the same class share at least two literal statements (Type 1/2/3) |
 | **Method Delegation** | Two methods have no shared code but a compatible signature (typically Type 4) |
-| **Pull Up Method** | Two methods live in sibling subclasses sharing a common superclass, and are structurally identical (exact match, or identical apart from renamed local variables — never renamed fields) |
-| **Push Down Method** | A method sits on a superclass but is only ever referenced from one specific subclass |
+| **Pull Up Method** | Two methods live in sibling subclasses sharing a common, user-defined superclass, and are structurally identical (exact match, or identical apart from renamed local variables — never renamed fields) |
+| **Push Down Method** | A method sits on a superclass with two or more direct subclasses, but is only ever referenced from exactly one of them |
 
 Each technique includes its own safety checks — parameter mismatches,
 variables that escape the shared block, conditional returns without a
 guaranteed path, naming collisions — and refuses rather than guesses
-whenever it can't prove the refactor is safe.
+whenever it can't prove the refactor is safe. Extract Method in particular
+requires at least two statements of literal overlap before running
+automatically; a near-miss clone whose only shared logic is a single
+statement is still detected and reported, just not auto-refactored, since
+a single shared line (like a guard clause) isn't always safe to lift in
+isolation.
 
 ---
 
@@ -179,8 +194,11 @@ whenever it can't prove the refactor is safe.
 Each **Scan Current File** opens a *session* — a snapshot of the file's
 current state. If you apply one or more refactors before the next scan,
 that session becomes a permanent data point the moment the next scan
-begins; scanning again with nothing changed records nothing. History is
-appended to `.cloneguard/metrics.jsonl` in your project root.
+begins; scanning again with nothing changed records nothing. A
+paste-triggered refactor (Scenario 1) can also open its own session if
+none is already active, so trend data isn't limited to file-scan-driven
+workflows. History is appended to `.cloneguard/metrics.jsonl` in your
+project root.
 
 Per session, the dashboard shows a before/after lines-of-code chart, a
 refactor-type breakdown, a clone-type breakdown, and — if **SciTools
@@ -198,25 +216,58 @@ metrics:
 (LOC is tracked too, but from the plugin's own line count, shown on the
 chart above rather than in this metrics row.)
 
+A toggle in the dashboard switches between the current file's own history
+and a whole-project average, computed from the latest session of every
+file that has at least one recorded scan.
+
 **Understand is entirely optional** and completely separate from the
 detection server — it's a locally installed desktop tool used only to
 power this one dashboard row. Everything else in CloneGuard works fully
-without it.
+without it, and if it isn't installed the dashboard simply shows
+"Understand not available" for that row.
 
 ### Installing Understand (optional)
 
-1. Download and license from [scitools.com](https://scitools.com) (free
-   educational licenses available)
-2. CloneGuard looks for `und` at its default macOS install path,
-   `/Applications/Understand.app/Contents/MacOS/und`
+Understand is a paid static-analysis tool from SciTools, with free
+educational licenses available.
 
-**A real gotcha:** adding `und` to your shell's `PATH` does **not** make it
-visible to IntelliJ. IntelliJ is a GUI app, and GUI apps on macOS don't
-inherit PATH changes made in a terminal. This is why CloneGuard checks
-Understand's known install location directly rather than trusting PATH.
+1. Go to [scitools.com](https://scitools.com) and download Understand for
+   your OS — Windows, macOS, or Linux are all supported.
+2. Sign up for a license (educational licenses are free for students and
+   faculty) and activate it on first launch.
+3. Confirm the command-line tool works, by opening a terminal and running:
+   ```
+   und version
+   ```
+   This should print a version string. If it doesn't, Understand's `bin`
+   folder likely isn't the one CloneGuard is looking for — see the exact
+   paths below.
 
-If Understand isn't installed, the dashboard simply shows "Understand not
-available" for that row — nothing else is affected.
+CloneGuard looks for the `und` executable at these locations, in order,
+falling back to a bare `und` command last (in case it's genuinely on
+`PATH` for the process that launched the IDE):
+
+| OS | Path CloneGuard checks |
+|----|------------------------|
+| macOS | `/Applications/Understand.app/Contents/MacOS/und` |
+| Windows | `C:\Program Files\SciTools\bin\pc-win64\und.exe` |
+| Linux | `/usr/bin/und` and `/opt/scitools/bin/linux64/und` |
+
+If your install landed somewhere else, the simplest fix is a symlink (or,
+on Windows, copying `und.exe`) into one of the paths above.
+
+**A real gotcha, especially on macOS:** adding `und` to your shell's
+`PATH` does **not** make it visible to IntelliJ. IntelliJ is a GUI app,
+and GUI apps launched from Finder/Spotlight/the Dock don't inherit `PATH`
+changes made in a terminal — this is exactly why CloneGuard checks
+Understand's known install locations directly instead of trusting `PATH`.
+If you routinely launch IntelliJ from a terminal (e.g. `idea .`), your
+shell's `PATH` *would* carry through in that specific case, but the
+built-in path list above works regardless of how IntelliJ was launched.
+
+If Understand isn't installed at all, or the executable genuinely can't be
+found, the dashboard simply shows "Understand not available" for that row
+— nothing else in CloneGuard is affected.
 
 ---
 
@@ -316,7 +367,7 @@ own Help → About version falls within `build.gradle`'s `sinceBuild`/
 
 **Paste interception never fires** — this relies on JetBrains AI Assistant
 being enabled (Settings → Tools → AI Assistant); it also only fires on
-insertions large enough to plausibly be a full method.
+insertions large enough to plausibly be a full method or class.
 
 **Getting 401s from the detection server** — your configured API key
 (Settings → Tools → CloneGuard) doesn't match what the server expects.
@@ -328,14 +379,15 @@ spins down after idle periods (Render's standard behavior) and takes a
 moment to wake back up.
 
 **Trend Dashboard says "Understand not available"** — confirm `und
-version` works from a terminal, and see the PATH note above — this is the
-most common cause on macOS.
+version` works from a terminal, check the install-location table above for
+your OS, and see the PATH gotcha above — this is the most common cause,
+especially on macOS.
 
 **Understand's numbers look like they're from before your refactor, not
-after** — make sure you're on a build where the file is explicitly saved
-to disk before the "after" Understand analysis runs. Understand reads the
-file straight from disk as an external process; if IntelliJ hadn't flushed
-its in-memory edit yet, it would silently analyze stale content.
+after** — make sure the file is explicitly saved to disk before the
+"after" Understand analysis runs. Understand reads the file straight from
+disk as an external process; if IntelliJ hadn't flushed its in-memory edit
+yet, it would silently analyze stale content.
 
 **PR check never runs** — confirm `CLONEGUARD_SERVER_URL` and
 `CLONEGUARD_API_KEY` are set as repository secrets (Settings → Secrets and
