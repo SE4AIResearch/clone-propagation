@@ -12,5 +12,19 @@
     "pullUpCount": 0,
     "pushDownCount": 0,
     "understandAvailable": false
+  },
+  {
+    "timestamp": 1785862586641,
+    "fileName": "DiscountCalcDemo.java",
+    "source": "github_pr",
+    "pullRequestNumber": 22,
+    "locBefore": 26,
+    "locAfter": 25,
+    "duplicatedLinesEliminated": 1,
+    "extractCount": 1,
+    "delegateCount": 0,
+    "pullUpCount": 0,
+    "pushDownCount": 0,
+    "understandAvailable": false
   }
 ]
