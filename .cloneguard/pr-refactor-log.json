@@ -12,5 +12,19 @@
     "pullUpCount": 0,
     "pushDownCount": 0,
     "understandAvailable": false
+  },
+  {
+    "timestamp": 1789934594066,
+    "fileName": "CloneTest.java",
+    "source": "github_pr",
+    "pullRequestNumber": 26,
+    "locBefore": 25,
+    "locAfter": 23,
+    "duplicatedLinesEliminated": 2,
+    "extractCount": 1,
+    "delegateCount": 0,
+    "pullUpCount": 0,
+    "pushDownCount": 0,
+    "understandAvailable": false
   }
 ]
