@@ -12,5 +12,19 @@
     "pullUpCount": 0,
     "pushDownCount": 0,
     "understandAvailable": false
+  },
+  {
+    "timestamp": 1790016141963,
+    "fileName": "2.java",
+    "source": "github_pr",
+    "pullRequestNumber": 27,
+    "locBefore": 42,
+    "locAfter": 42,
+    "duplicatedLinesEliminated": 0,
+    "extractCount": 1,
+    "delegateCount": 0,
+    "pullUpCount": 0,
+    "pushDownCount": 0,
+    "understandAvailable": false
   }
 ]
