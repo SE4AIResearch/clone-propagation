@@ -2,7 +2,7 @@
     <id>com.cloneguard</id>
     <name>CloneGuard</name>
     <vendor email="cloneguard@dev.com" url="">CloneGuard</vendor>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
 
     <description><![CDATA[
         CloneGuard detects all 4 types of code clones from JetBrains AI inline suggestions
