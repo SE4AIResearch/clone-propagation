@@ -12,5 +12,19 @@
     "pullUpCount": 0,
     "pushDownCount": 0,
     "understandAvailable": false
+  },
+  {
+    "timestamp": 1786061160389,
+    "fileName": "GcdCheckDemo.java",
+    "source": "github_pr",
+    "pullRequestNumber": 25,
+    "locBefore": 16,
+    "locAfter": 15,
+    "duplicatedLinesEliminated": 1,
+    "extractCount": 0,
+    "delegateCount": 1,
+    "pullUpCount": 0,
+    "pushDownCount": 0,
+    "understandAvailable": false
   }
 ]
