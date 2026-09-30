@@ -124,6 +124,115 @@ public class ExtractMethodEngine {
         }
     }
 
+    // ── FIX (found live, friend/reviewer testing -- confirmed with
+    // calculateAverage()/findAverage(), a genuine Type 3 near-miss clone
+    // with NO literal shared statement block): server.py's
+    // generate_extract_suggestion() already falls back to Method
+    // Delegation whenever Extract Method has nothing to extract, gated by
+    // requiring real OPERATOR-level evidence (not just generic identifier
+    // overlap) before allowing that fallback -- a safeguard added there
+    // after a real false positive (coreSumValues()/sumEvenNumbersLoop())
+    // slipped through on identifier overlap alone and silently deleted
+    // real logic. This engine had no equivalent fallback at all: Extract
+    // Method would correctly refuse, then simply stop, even for Scenario
+    // 1/2 pairs the GitHub bot (Scenario 3) would have successfully
+    // delegated. Ported the same operator-fingerprint gate here so all
+    // three scenarios behave consistently -- see
+    // hasOperatorEvidenceForDelegationFallback() below, and its use in
+    // buildExtractionPlan()'s "nothing to extract" branch.
+    private static final Set<String> RARE_OPS = Set.of("/", "%");
+    private static final Set<String> UBIQUITOUS_OPS = Set.of("+", "-", "*", "<", ">", "==");
+
+    /**
+     * Best-effort Java port of server.py's operator_fingerprint_shared().
+     * Deliberately simplified relative to the Python version (no lambda-
+     * arrow-specific unary-minus edge case beyond stripping "->", no
+     * "http" guard beyond the same substring check) -- this only needs to
+     * decide whether there's genuine operator-level evidence for a risky
+     * fallback, not reproduce every edge case of the original false-
+     * positive-elimination work. When in doubt, this errs toward finding
+     * LESS evidence (safer: falls through to the plain abort dialog)
+     * rather than more.
+     */
+    private static Set<String> operatorFingerprint(String code) {
+        Set<String> ops = new HashSet<>();
+        if (code == null) return ops;
+
+        String codeNoStrings = code.replaceAll("\"(?:[^\"\\\\]|\\\\.)*\"", "\"\"");
+        codeNoStrings = codeNoStrings.replace("->", " LAMBDA_ARROW ");
+
+        if (codeNoStrings.contains("+=") || Pattern.compile("\\w[\\]\\)]?\\s*\\+\\s*\\w").matcher(codeNoStrings).find()) {
+            ops.add("+");
+        }
+
+        if (codeNoStrings.contains("-=")) {
+            ops.add("-");
+        } else {
+            Set<String> unaryContextWords = Set.of("return", "case", "throw");
+            String unaryContextChars = "=(,+-*/%<>!&|";
+            List<String> toks = new ArrayList<>();
+            Matcher tokM = Pattern.compile("\\w+|[^\\w\\s]").matcher(codeNoStrings);
+            while (tokM.find()) toks.add(tokM.group());
+            for (int idx = 0; idx < toks.size(); idx++) {
+                if (!toks.get(idx).equals("-")) continue;
+                if (idx == 0) continue;
+                String prev = toks.get(idx - 1);
+                if (unaryContextWords.contains(prev)) continue;
+                if (prev.length() == 1 && unaryContextChars.contains(prev)) continue;
+                if (prev.matches("\\w+") || prev.equals(")") || prev.equals("]")) {
+                    ops.add("-");
+                    break;
+                }
+            }
+        }
+
+        if (codeNoStrings.contains("*=") || Pattern.compile("\\*\\s*\\w+").matcher(codeNoStrings).find()) {
+            ops.add("*");
+        }
+        if (codeNoStrings.contains("/") && !codeNoStrings.toLowerCase().contains("http")) {
+            ops.add("/");
+        }
+        if (codeNoStrings.contains("%")) {
+            ops.add("%");
+        }
+        if (codeNoStrings.contains("<")) ops.add("<");
+        if (codeNoStrings.contains(">")) ops.add(">");
+        if (codeNoStrings.contains("==")) ops.add("==");
+        if (codeNoStrings.contains("!=")) ops.add("!=");
+        if (code.contains("charAt") || code.contains("substring") || code.contains("+ \"") || code.contains("\" +")) {
+            ops.add("string");
+        }
+
+        boolean hasSingleAmp = Pattern.compile("(?<!&)&(?!&)").matcher(codeNoStrings).find();
+        boolean hasSinglePipe = Pattern.compile("(?<!\\|)\\|(?!\\|)").matcher(codeNoStrings).find();
+        if (hasSingleAmp || hasSinglePipe || codeNoStrings.contains("^")) {
+            ops.add("bitwise");
+        }
+
+        return ops;
+    }
+
+    /**
+     * True if canonicalBody and duplicateBody share enough real operator-
+     * level evidence to safely allow the Extract→Delegate fallback below
+     * -- mirrors server.py's has_operator_evidence check exactly: either
+     * 2+ shared NON-ubiquitous operators, or 1+ shared RARE operator
+     * (/, %). Ubiquitous operators (+, -, *, <, >, ==) alone never count,
+     * since nearly every numeric method uses them regardless of whether
+     * it's actually related to the other method.
+     */
+    private static boolean hasOperatorEvidenceForDelegationFallback(String canonicalBodyText, String duplicateBodyText) {
+        Set<String> fpA = operatorFingerprint(canonicalBodyText);
+        Set<String> fpB = operatorFingerprint(duplicateBodyText);
+        Set<String> shared = new HashSet<>(fpA);
+        shared.retainAll(fpB);
+        Set<String> meaningfulShared = new HashSet<>(shared);
+        meaningfulShared.removeAll(UBIQUITOUS_OPS);
+        Set<String> sharedRare = new HashSet<>(shared);
+        sharedRare.retainAll(RARE_OPS);
+        return meaningfulShared.size() >= 2 || sharedRare.size() >= 1;
+    }
+
     // FIX (found live, Pull Up Method testing): resolves a method name
     // against a PsiFile, supporting TWO formats. A bare simple name
     // ("describe") matches the first method found with that name --
@@ -238,6 +347,15 @@ public class ExtractMethodEngine {
         String abortTitle;
         String abortMessage;
         int abortMessageType;
+
+        // FIX (Extract→Delegate fallback): true only when this plan was
+        // aborted specifically because NO shared statement block exists
+        // (not for any other abort reason -- parameter-count mismatch,
+        // conditional return, etc., which stay hard aborts) AND real
+        // operator-level evidence backs a Method Delegation fallback.
+        // The caller (extract()) checks this flag before showing the
+        // abort dialog -- see hasOperatorEvidenceForDelegationFallback().
+        boolean noSharedBlockFallbackEligible;
 
         PsiMethod canonicalMethod;
         PsiMethod duplicateMethod;
@@ -385,6 +503,22 @@ public class ExtractMethodEngine {
         ExtractionPlan plan = planHolder[0];
 
         if (plan.aborted) {
+            // FIX (found live, friend/reviewer testing -- Type 3 clones
+            // with no literal shared block): before showing the "nothing
+            // to extract" dialog and stopping, try Method Delegation
+            // instead, but ONLY when buildExtractionPlan() already
+            // confirmed real operator-level evidence backs it (see
+            // hasOperatorEvidenceForDelegationFallback()) -- this is the
+            // exact same fallback server.py's generate_extract_suggestion()
+            // already performs for Scenario 3, now available in the IDE
+            // for Scenarios 1 and 2 as well. Every other abort reason
+            // (parameter mismatch, conditional return, wrong class, etc.)
+            // is untouched and still shows its own specific dialog, since
+            // those are genuine safety refusals, not "nothing found yet."
+            if (plan.noSharedBlockFallbackEligible) {
+                delegate(targetFile, canonical, duplicate, cloneTypeLabel, onComplete);
+                return;
+            }
             showDialog( plan.abortMessage, plan.abortTitle, plan.abortMessageType);
             return;
         }
@@ -581,13 +715,34 @@ public class ExtractMethodEngine {
                             "the CloneGuard tool window instead, which re-checks against the current code.";
                 }
             }
-            return ExtractionPlan.abort("CloneGuard — Nothing to Extract",
+
+            // FIX (found live, friend/reviewer testing -- Type 3 clones
+            // with no literal shared block, e.g. calculateAverage()/
+            // findAverage()): compute whether this pair has real
+            // operator-level evidence for a safe Method Delegation
+            // fallback (see hasOperatorEvidenceForDelegationFallback()
+            // above), and record it on the aborted plan so extract()'s
+            // caller can decide whether to try delegate() instead of just
+            // stopping here. This mirrors server.py's
+            // generate_extract_suggestion() fallback, which already does
+            // this for the GitHub bot (Scenario 3) -- the IDE (Scenarios
+            // 1/2) previously had no equivalent, which is exactly what a
+            // reviewer's testing caught: Extract Method correctly refused
+            // this pair, but nothing tried Delegation afterward even
+            // though the pair was already confirmed to be a genuine clone
+            // by detection.
+            boolean hasOperatorEvidence = hasOperatorEvidenceForDelegationFallback(
+                    canonicalBody.getText(), duplicateBody.getText());
+
+            ExtractionPlan abortPlan = ExtractionPlan.abort("CloneGuard — Nothing to Extract",
                     "CloneGuard could not find any statements " + canonical + "() and " + duplicate +
                     "() actually have in common — their implementations are completely different " +
                     "(this is expected for Type 4 semantic clones, e.g. recursive vs. iterative)." +
                     wrapperNote + "\n\n" +
                     "Extract Method has nothing to extract here. No changes were made.",
                     JOptionPane.INFORMATION_MESSAGE);
+            abortPlan.noSharedBlockFallbackEligible = hasOperatorEvidence;
+            return abortPlan;
         }
 
         int cStart = run[0], dStart = run[1], len = run[2];
@@ -1090,6 +1245,15 @@ public class ExtractMethodEngine {
     // completely untouched. Mirrors the same technique already built and
     // verified on the GitHub-bot side of CloneGuard (server.py's
     // generate_delegation_suggestion).
+    //
+    // FIX (found live, friend/reviewer testing): this is now ALSO the
+    // fallback target for extract() whenever Extract Method finds no
+    // shared block but real operator-level evidence still backs the pair
+    // -- see buildExtractionPlan()'s "Nothing to Extract" branch and
+    // extract()'s handling of plan.noSharedBlockFallbackEligible. This
+    // method's own logic below is completely unchanged for that case; it
+    // doesn't need to know WHY it was called, only whether the pair it's
+    // given has a compatible signature, exactly as it always has.
     public void delegate(String canonical, String duplicate, String cloneTypeLabel, java.util.function.Consumer<PsiFile> onComplete) {
         Editor editor = FileEditorManager.getInstance(project).getSelectedTextEditor();
         if (editor == null) {

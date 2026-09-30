@@ -374,9 +374,36 @@ jobs:
                   "suggestion above can also be applied directly via **Commit "
                   "suggestion** without using this checklist.)\n\n"
               )
+              # FIX (found live, this session -- PR bot re-verification pass):
+              # this used to derive the displayed technique PURELY from clone
+              # type ("Extract Method" for Type 1/2, "Method Delegation"
+              # otherwise), completely independent of what technique the
+              # suggestion actually generated. Type 3 near-miss clones (which
+              # fall into the "otherwise" branch) very often DO have real
+              # shared statements and get a genuine Extract Method suggestion
+              # -- confirmed directly: a Type 3 findMax()/findMaxSafe() pair
+              # was labeled "Method Delegation" here in the checklist, while
+              # the actual inline "Commit suggestion" comment posted for the
+              # exact same pair a few lines above (Step 4, which correctly
+              # reads suggestion['technique']) said "Extract Method suggestion"
+              # -- two contradictory labels for the same clone group in the
+              # same PR comment. Fixed by reading the real
+              # suggestion['technique'] field here too, the same field Step 4
+              # already uses correctly, falling back to the old type-based
+              # guess only when no suggestion is available at all to read a
+              # real answer from.
               for i, g in enumerate(groups, 1):
                   type_label = g["cloneType"].split("—")[0].strip()
-                  technique = "Extract Method" if "Type 1" in type_label or "Type 2" in type_label else "Method Delegation"
+                  suggestion_technique = g.get("suggestion", {}).get("technique")
+                  if suggestion_technique == "delegation":
+                      technique = "Method Delegation"
+                  elif suggestion_technique == "extract":
+                      technique = "Extract Method"
+                  else:
+                      # No suggestion available for this pair (generation
+                      # failed, or nothing was extractable/delegatable) --
+                      # best-effort label only, same guess as before.
+                      technique = "Extract Method" if "Type 1" in type_label or "Type 2" in type_label else "Method Delegation"
                   body += (
                       f"- [ ] **{i}.** `{g.get('filepath', g['filename'])}`: `{g['functionA']}()` "
                       f"↔ `{g['functionB']}()` — {type_label}, {technique}\n"
