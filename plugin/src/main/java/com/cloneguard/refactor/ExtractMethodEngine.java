@@ -2,6 +2,7 @@ package com.cloneguard.refactor;
 
 import com.intellij.openapi.application.ReadAction;
 import com.intellij.openapi.command.WriteCommandAction;
+import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.fileEditor.FileEditorManager;
@@ -124,113 +125,120 @@ public class ExtractMethodEngine {
         }
     }
 
-    // ── FIX (found live, friend/reviewer testing -- confirmed with
-    // calculateAverage()/findAverage(), a genuine Type 3 near-miss clone
-    // with NO literal shared statement block): server.py's
-    // generate_extract_suggestion() already falls back to Method
-    // Delegation whenever Extract Method has nothing to extract, gated by
-    // requiring real OPERATOR-level evidence (not just generic identifier
-    // overlap) before allowing that fallback -- a safeguard added there
-    // after a real false positive (coreSumValues()/sumEvenNumbersLoop())
-    // slipped through on identifier overlap alone and silently deleted
-    // real logic. This engine had no equivalent fallback at all: Extract
-    // Method would correctly refuse, then simply stop, even for Scenario
-    // 1/2 pairs the GitHub bot (Scenario 3) would have successfully
-    // delegated. Ported the same operator-fingerprint gate here so all
-    // three scenarios behave consistently -- see
-    // hasOperatorEvidenceForDelegationFallback() below, and its use in
-    // buildExtractionPlan()'s "nothing to extract" branch.
-    private static final Set<String> RARE_OPS = Set.of("/", "%");
-    private static final Set<String> UBIQUITOUS_OPS = Set.of("+", "-", "*", "<", ">", "==");
+    // ═════════════════════════════════════════════════════════════════════
+    // NEW FEATURE (today's session): post-refactor compilation validation
+    // ═════════════════════════════════════════════════════════════════════
+    //
+    // Every refactor below already has its own targeted safety checks
+    // (parameter mismatch, conditional returns, subclass-only dependencies,
+    // etc.) performed BEFORE any write happens. This is a different,
+    // complementary layer: a single, general-purpose check performed AFTER
+    // the write, confirming the resulting file is still valid Java at all
+    // -- a safety net that doesn't need to know anything about which
+    // specific refactor just ran.
+    //
+    // Deliberately PSI-based, not a real javac/compiler-API invocation:
+    // compiling via javax.tools.JavaCompiler would need this project's
+    // full classpath (every dependency JAR) configured correctly to avoid
+    // false failures on legitimate code, which is fragile and
+    // machine/setup-dependent -- something that works for one contributor
+    // could falsely report errors for another with a different local
+    // environment. Checking for PsiErrorElements (syntax errors) and
+    // unresolved PsiReferenceExpressions (identifiers that don't resolve
+    // to anything) needs zero external configuration and uses only
+    // IntelliJ's own already-loaded PSI/resolution machinery, so it
+    // behaves identically for every user who builds this plugin from the
+    // shared Gradle project -- exactly the portability this needs.
+    //
+    // Never auto-reverts silently: if a problem is found, the user is
+    // asked directly whether to revert or keep the result -- CloneGuard
+    // can't safely decide that unilaterally (an "unresolved" reference
+    // might be a real problem, or might be something a human recognizes
+    // as fine, e.g. a type that exists but hasn't been re-indexed yet).
 
-    /**
-     * Best-effort Java port of server.py's operator_fingerprint_shared().
-     * Deliberately simplified relative to the Python version (no lambda-
-     * arrow-specific unary-minus edge case beyond stripping "->", no
-     * "http" guard beyond the same substring check) -- this only needs to
-     * decide whether there's genuine operator-level evidence for a risky
-     * fallback, not reproduce every edge case of the original false-
-     * positive-elimination work. When in doubt, this errs toward finding
-     * LESS evidence (safer: falls through to the plain abort dialog)
-     * rather than more.
-     */
-    private static Set<String> operatorFingerprint(String code) {
-        Set<String> ops = new HashSet<>();
-        if (code == null) return ops;
-
-        String codeNoStrings = code.replaceAll("\"(?:[^\"\\\\]|\\\\.)*\"", "\"\"");
-        codeNoStrings = codeNoStrings.replace("->", " LAMBDA_ARROW ");
-
-        if (codeNoStrings.contains("+=") || Pattern.compile("\\w[\\]\\)]?\\s*\\+\\s*\\w").matcher(codeNoStrings).find()) {
-            ops.add("+");
-        }
-
-        if (codeNoStrings.contains("-=")) {
-            ops.add("-");
-        } else {
-            Set<String> unaryContextWords = Set.of("return", "case", "throw");
-            String unaryContextChars = "=(,+-*/%<>!&|";
-            List<String> toks = new ArrayList<>();
-            Matcher tokM = Pattern.compile("\\w+|[^\\w\\s]").matcher(codeNoStrings);
-            while (tokM.find()) toks.add(tokM.group());
-            for (int idx = 0; idx < toks.size(); idx++) {
-                if (!toks.get(idx).equals("-")) continue;
-                if (idx == 0) continue;
-                String prev = toks.get(idx - 1);
-                if (unaryContextWords.contains(prev)) continue;
-                if (prev.length() == 1 && unaryContextChars.contains(prev)) continue;
-                if (prev.matches("\\w+") || prev.equals(")") || prev.equals("]")) {
-                    ops.add("-");
-                    break;
-                }
-            }
-        }
-
-        if (codeNoStrings.contains("*=") || Pattern.compile("\\*\\s*\\w+").matcher(codeNoStrings).find()) {
-            ops.add("*");
-        }
-        if (codeNoStrings.contains("/") && !codeNoStrings.toLowerCase().contains("http")) {
-            ops.add("/");
-        }
-        if (codeNoStrings.contains("%")) {
-            ops.add("%");
-        }
-        if (codeNoStrings.contains("<")) ops.add("<");
-        if (codeNoStrings.contains(">")) ops.add(">");
-        if (codeNoStrings.contains("==")) ops.add("==");
-        if (codeNoStrings.contains("!=")) ops.add("!=");
-        if (code.contains("charAt") || code.contains("substring") || code.contains("+ \"") || code.contains("\" +")) {
-            ops.add("string");
-        }
-
-        boolean hasSingleAmp = Pattern.compile("(?<!&)&(?!&)").matcher(codeNoStrings).find();
-        boolean hasSinglePipe = Pattern.compile("(?<!\\|)\\|(?!\\|)").matcher(codeNoStrings).find();
-        if (hasSingleAmp || hasSinglePipe || codeNoStrings.contains("^")) {
-            ops.add("bitwise");
-        }
-
-        return ops;
+    private enum ValidationOutcome {
+        VALID,          // no problems found, or nothing to check against
+        KEPT_INVALID,   // a problem was found; user chose "Keep Anyway"
+        REVERTED        // a problem was found; user chose "Revert"
     }
 
     /**
-     * True if canonicalBody and duplicateBody share enough real operator-
-     * level evidence to safely allow the Extract→Delegate fallback below
-     * -- mirrors server.py's has_operator_evidence check exactly: either
-     * 2+ shared NON-ubiquitous operators, or 1+ shared RARE operator
-     * (/, %). Ubiquitous operators (+, -, *, <, >, ==) alone never count,
-     * since nearly every numeric method uses them regardless of whether
-     * it's actually related to the other method.
+     * True if `scope` contains a real problem a refactor could have
+     * introduced: a syntax error, or an identifier that doesn't resolve
+     * to anything (a typo'd helper name, a reference to something that no
+     * longer exists after the rewrite, etc).
      */
-    private static boolean hasOperatorEvidenceForDelegationFallback(String canonicalBodyText, String duplicateBodyText) {
-        Set<String> fpA = operatorFingerprint(canonicalBodyText);
-        Set<String> fpB = operatorFingerprint(duplicateBodyText);
-        Set<String> shared = new HashSet<>(fpA);
-        shared.retainAll(fpB);
-        Set<String> meaningfulShared = new HashSet<>(shared);
-        meaningfulShared.removeAll(UBIQUITOUS_OPS);
-        Set<String> sharedRare = new HashSet<>(shared);
-        sharedRare.retainAll(RARE_OPS);
-        return meaningfulShared.size() >= 2 || sharedRare.size() >= 1;
+    private static boolean hasCompilationErrors(PsiElement scope) {
+    if (scope == null) return false;
+    return ReadAction.compute(() -> {
+        if (!PsiTreeUtil.findChildrenOfType(scope, PsiErrorElement.class).isEmpty()) {
+            return true;
+        }
+        for (PsiReferenceExpression ref : PsiTreeUtil.findChildrenOfType(scope, PsiReferenceExpression.class)) {
+            if (ref.resolve() == null) {
+                return true;
+            }
+        }
+        return false;
+    });
+}
+
+    /**
+     * Call right after a refactor's write action completes, passing the
+     * file's full text as it was immediately BEFORE that write action ran
+     * (captured by the caller beforehand). Re-commits the document, then
+     * checks the whole file for compilation problems.
+     *
+     * If the file is clean, returns VALID immediately with no dialog --
+     * the overwhelming majority of refactors hit this path, and nothing
+     * about today's existing success flow changes for them.
+     *
+     * If a problem IS found, asks the user directly whether to revert --
+     * see the class javadoc above for why this is a prompt, not a silent
+     * auto-revert. "Revert" restores the ENTIRE file back to
+     * beforeSnapshot -- a whole-file restore, not a surgical undo of just
+     * the touched methods, since that's the only way to GUARANTEE landing
+     * back on exactly the valid state the file was already in, with zero
+     * risk of the rollback itself producing something broken. "Keep
+     * Anyway" leaves the refactor's output untouched and warns the user
+     * it may not compile, so they can fix it by hand if they choose.
+     */
+    private ValidationOutcome validateAndMaybeRevert(PsiFile psiFile, String beforeSnapshot) {
+        if (beforeSnapshot == null || psiFile == null) return ValidationOutcome.VALID;
+
+        PsiDocumentManager.getInstance(project).commitAllDocuments();
+        if (!hasCompilationErrors(psiFile)) {
+            return ValidationOutcome.VALID;
+        }
+
+        int choice = Messages.showYesNoDialog(
+                "CloneGuard detected a possible problem with the refactored code -- it appears to contain " +
+                "a syntax error or a reference to something that no longer resolves, and may not compile.\n\n" +
+                "Revert this refactor back to the code as it was before, or keep it and review/fix it yourself?",
+                "CloneGuard — Refactor May Be Invalid",
+                "Revert", "Keep Anyway",
+                Messages.getWarningIcon());
+
+        if (choice == Messages.YES) {
+            Document document = PsiDocumentManager.getInstance(project).getDocument(psiFile);
+            if (document != null) {
+                WriteCommandAction.runWriteCommandAction(project, "CloneGuard Revert Invalid Refactor", null, () -> {
+                    document.setText(beforeSnapshot);
+                });
+            }
+            showDialog(
+                    "CloneGuard: this refactor produced invalid code and was automatically reverted. " +
+                    "No changes were kept.",
+                    "CloneGuard — Refactor Reverted", JOptionPane.WARNING_MESSAGE);
+            return ValidationOutcome.REVERTED;
+        } else {
+            showDialog(
+                    "CloneGuard: the refactored code may not compile (a syntax error or unresolved reference " +
+                    "was detected), but it has been kept as you requested. You may want to review and fix it " +
+                    "manually.",
+                    "CloneGuard — Kept Possibly-Invalid Code", JOptionPane.WARNING_MESSAGE);
+            return ValidationOutcome.KEPT_INVALID;
+        }
     }
 
     // FIX (found live, Pull Up Method testing): resolves a method name
@@ -376,6 +384,115 @@ public class ExtractMethodEngine {
             p.abortMessageType = type;
             return p;
         }
+    }
+
+    // ── FIX (found live, friend/reviewer testing -- confirmed with
+    // calculateAverage()/findAverage(), a genuine Type 3 near-miss clone
+    // with NO literal shared statement block): server.py's
+    // generate_extract_suggestion() already falls back to Method
+    // Delegation whenever Extract Method has nothing to extract, gated by
+    // requiring real OPERATOR-level evidence (not just generic identifier
+    // overlap) before allowing that fallback -- a safeguard added there
+    // after a real false positive (coreSumValues()/sumEvenNumbersLoop())
+    // slipped through on identifier overlap alone and silently deleted
+    // real logic. This engine had no equivalent fallback at all: Extract
+    // Method would correctly refuse, then simply stop, even for Scenario
+    // 1/2 pairs the GitHub bot (Scenario 3) would have successfully
+    // delegated. Ported the same operator-fingerprint gate here so all
+    // three scenarios behave consistently -- see
+    // hasOperatorEvidenceForDelegationFallback() below, and its use in
+    // buildExtractionPlan()'s "nothing to extract" branch.
+    private static final Set<String> RARE_OPS = Set.of("/", "%");
+    private static final Set<String> UBIQUITOUS_OPS = Set.of("+", "-", "*", "<", ">", "==");
+
+    /**
+     * Best-effort Java port of server.py's operator_fingerprint_shared().
+     * Deliberately simplified relative to the Python version (no lambda-
+     * arrow-specific unary-minus edge case beyond stripping "->", no
+     * "http" guard beyond the same substring check) -- this only needs to
+     * decide whether there's genuine operator-level evidence for a risky
+     * fallback, not reproduce every edge case of the original false-
+     * positive-elimination work. When in doubt, this errs toward finding
+     * LESS evidence (safer: falls through to the plain abort dialog)
+     * rather than more.
+     */
+    private static Set<String> operatorFingerprint(String code) {
+        Set<String> ops = new HashSet<>();
+        if (code == null) return ops;
+
+        String codeNoStrings = code.replaceAll("\"(?:[^\"\\\\]|\\\\.)*\"", "\"\"");
+        codeNoStrings = codeNoStrings.replace("->", " LAMBDA_ARROW ");
+
+        if (codeNoStrings.contains("+=") || Pattern.compile("\\w[\\]\\)]?\\s*\\+\\s*\\w").matcher(codeNoStrings).find()) {
+            ops.add("+");
+        }
+
+        if (codeNoStrings.contains("-=")) {
+            ops.add("-");
+        } else {
+            Set<String> unaryContextWords = Set.of("return", "case", "throw");
+            String unaryContextChars = "=(,+-*/%<>!&|";
+            List<String> toks = new ArrayList<>();
+            Matcher tokM = Pattern.compile("\\w+|[^\\w\\s]").matcher(codeNoStrings);
+            while (tokM.find()) toks.add(tokM.group());
+            for (int idx = 0; idx < toks.size(); idx++) {
+                if (!toks.get(idx).equals("-")) continue;
+                if (idx == 0) continue;
+                String prev = toks.get(idx - 1);
+                if (unaryContextWords.contains(prev)) continue;
+                if (prev.length() == 1 && unaryContextChars.contains(prev)) continue;
+                if (prev.matches("\\w+") || prev.equals(")") || prev.equals("]")) {
+                    ops.add("-");
+                    break;
+                }
+            }
+        }
+
+        if (codeNoStrings.contains("*=") || Pattern.compile("\\*\\s*\\w+").matcher(codeNoStrings).find()) {
+            ops.add("*");
+        }
+        if (codeNoStrings.contains("/") && !codeNoStrings.toLowerCase().contains("http")) {
+            ops.add("/");
+        }
+        if (codeNoStrings.contains("%")) {
+            ops.add("%");
+        }
+        if (codeNoStrings.contains("<")) ops.add("<");
+        if (codeNoStrings.contains(">")) ops.add(">");
+        if (codeNoStrings.contains("==")) ops.add("==");
+        if (codeNoStrings.contains("!=")) ops.add("!=");
+        if (code.contains("charAt") || code.contains("substring") || code.contains("+ \"") || code.contains("\" +")) {
+            ops.add("string");
+        }
+
+        boolean hasSingleAmp = Pattern.compile("(?<!&)&(?!&)").matcher(codeNoStrings).find();
+        boolean hasSinglePipe = Pattern.compile("(?<!\\|)\\|(?!\\|)").matcher(codeNoStrings).find();
+        if (hasSingleAmp || hasSinglePipe || codeNoStrings.contains("^")) {
+            ops.add("bitwise");
+        }
+
+        return ops;
+    }
+
+    /**
+     * True if canonicalBody and duplicateBody share enough real operator-
+     * level evidence to safely allow the Extract→Delegate fallback below
+     * -- mirrors server.py's has_operator_evidence check exactly: either
+     * 2+ shared NON-ubiquitous operators, or 1+ shared RARE operator
+     * (/, %). Ubiquitous operators (+, -, *, <, >, ==) alone never count,
+     * since nearly every numeric method uses them regardless of whether
+     * it's actually related to the other method.
+     */
+    private static boolean hasOperatorEvidenceForDelegationFallback(String canonicalBodyText, String duplicateBodyText) {
+        Set<String> fpA = operatorFingerprint(canonicalBodyText);
+        Set<String> fpB = operatorFingerprint(duplicateBodyText);
+        Set<String> shared = new HashSet<>(fpA);
+        shared.retainAll(fpB);
+        Set<String> meaningfulShared = new HashSet<>(shared);
+        meaningfulShared.removeAll(UBIQUITOUS_OPS);
+        Set<String> sharedRare = new HashSet<>(shared);
+        sharedRare.retainAll(RARE_OPS);
+        return meaningfulShared.size() >= 2 || sharedRare.size() >= 1;
     }
 
     public void extract(String canonical, String duplicate, String cloneTypeLabel, java.util.function.Consumer<PsiFile> onComplete) {
@@ -526,6 +643,13 @@ public class ExtractMethodEngine {
         int choice = Messages.showYesNoDialog(plan.confirmMessage, "CloneGuard — Confirm Refactor", Messages.getQuestionIcon());
         if (choice != Messages.YES) return;
 
+        // NEW (compilation validation feature): snapshot the file's full
+        // text NOW, before the write action runs -- this is the known-
+        // good state validateAndMaybeRevert() will offer to restore to if
+        // the refactor turns out to have produced invalid code.
+        Document extractDocumentForSnapshot = PsiDocumentManager.getInstance(project).getDocument(psiFile);
+        String extractBeforeSnapshot = (extractDocumentForSnapshot != null) ? extractDocumentForSnapshot.getText() : null;
+
         // Captured BEFORE the write action runs, from data already sitting
         // in the plan — the duplicate's original body text (about to be
         // replaced) versus its planned replacement text — so the "lines
@@ -584,19 +708,53 @@ public class ExtractMethodEngine {
             return;
         }
 
+        // NEW (compilation validation feature): check the result before
+        // trusting it. If the user chooses to revert, stop here entirely
+        // -- no metrics recorded, no success dialog, the file is back to
+        // its pre-refactor state.
+        ValidationOutcome extractValidation = validateAndMaybeRevert(psiFile, extractBeforeSnapshot);
+        if (extractValidation == ValidationOutcome.REVERTED) {
+            return;
+        }
+
         generatedHelperNames.add(plan.finalHelperName);
         if (plan.resultClassName != null) generatedResultClassNames.add(plan.resultClassName);
         extractedPairs.put(pairKey, System.currentTimeMillis());
         com.cloneguard.services.MetricsTrackerService.getInstance(project).recordRefactor("extract", duplicatedLinesEliminated, cloneTypeLabel);
 
-        showDialog(
-                "✅ Extract Method applied!\n\n" +
-                "Created helper: " + plan.finalHelperName + "()\n" +
-                canonical + "() and " + duplicate + "() both now call it.\n\n" +
-                "Re-scanning the file now to refresh results...",
-                "CloneGuard — Refactor Complete", JOptionPane.INFORMATION_MESSAGE);
+        // Skip the normal "success" dialog if the user just chose to keep
+        // possibly-invalid code -- validateAndMaybeRevert() already showed
+        // its own warning immediately above; a "✅ ... applied!" message
+        // right after that would be a contradictory, misleading pairing.
+        if (extractValidation != ValidationOutcome.KEPT_INVALID) {
+            showDialog(
+                    "✅ Extract Method applied!\n\n" +
+                    "Created helper: " + plan.finalHelperName + "()\n" +
+                    canonical + "() and " + duplicate + "() both now call it.\n\n" +
+                    "Re-scanning the file now to refresh results...",
+                    "CloneGuard — Refactor Complete", JOptionPane.INFORMATION_MESSAGE);
+        }
 
         onComplete.accept(psiFile);
+
+        // NEW: fire a real, background compile check after the refactor --
+        // doesn't block anything already shown, surfaces as a separate
+        // follow-up dialog once the real build finishes.
+        boolean extractCompiledBefore = (extractValidation != ValidationOutcome.KEPT_INVALID);
+        RealCompilationChecker.compareBeforeAndAfter(project, targetFile, extractCompiledBefore).thenAccept(verdict -> {
+            com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater(() -> {
+                switch (verdict) {
+                    case BOTH_COMPILED -> showDialog(
+                            "✅ Real compilation confirmed: the project compiled successfully after this refactor.",
+                            "CloneGuard — Compilation Verified", JOptionPane.INFORMATION_MESSAGE);
+                    case REFACTOR_BROKE_IT -> showDialog(
+                            "⚠️ This refactor's real compile FAILED -- the project no longer builds. Please review the change.",
+                            "CloneGuard — Compilation Check Failed", JOptionPane.WARNING_MESSAGE);
+                    case COULD_NOT_VERIFY -> { /* no build tool found -- stay silent, not an error */ }
+                    case BROKEN_BEFORE_ALREADY -> { /* pre-existing issue, not this refactor's fault -- stay silent */ }
+                }
+            });
+        });
     }
 
     // ── Pure analysis phase — every PSI read Extract Method needs, called
@@ -1301,6 +1459,10 @@ public class ExtractMethodEngine {
         int choice = Messages.showYesNoDialog(plan.confirmMessage, "CloneGuard — Confirm Refactor", Messages.getQuestionIcon());
         if (choice != Messages.YES) return;
 
+        // NEW (compilation validation feature): snapshot before writing.
+        Document delegateDocumentForSnapshot = PsiDocumentManager.getInstance(project).getDocument(psiFile);
+        String delegateBeforeSnapshot = (delegateDocumentForSnapshot != null) ? delegateDocumentForSnapshot.getText() : null;
+
         int oldDuplicateLines = countLines(plan.duplicateMethod.getBody() != null ? plan.duplicateMethod.getBody().getText() : "");
         int newDuplicateLines = countLines(plan.newDuplicateBodyText);
         int duplicatedLinesEliminated = Math.max(0, oldDuplicateLines - newDuplicateLines);
@@ -1332,17 +1494,44 @@ public class ExtractMethodEngine {
             return;
         }
 
+        // NEW (compilation validation feature): check the result before
+        // trusting it.
+        ValidationOutcome delegateValidation = validateAndMaybeRevert(psiFile, delegateBeforeSnapshot);
+        if (delegateValidation == ValidationOutcome.REVERTED) {
+            return;
+        }
+
         extractedPairs.put(pairKey, System.currentTimeMillis());
         com.cloneguard.services.MetricsTrackerService.getInstance(project).recordRefactor("delegate", duplicatedLinesEliminated, cloneTypeLabel);
 
-        showDialog(
-                "✅ Method Delegation applied!\n\n" +
-                duplicate + "() now calls " + canonical + "() directly.\n" +
-                canonical + "() was left unchanged.\n\n" +
-                "Re-scanning the file now to refresh results...",
-                "CloneGuard — Refactor Complete", JOptionPane.INFORMATION_MESSAGE);
+        if (delegateValidation != ValidationOutcome.KEPT_INVALID) {
+            showDialog(
+                    "✅ Method Delegation applied!\n\n" +
+                    duplicate + "() now calls " + canonical + "() directly.\n" +
+                    canonical + "() was left unchanged.\n\n" +
+                    "Re-scanning the file now to refresh results...",
+                    "CloneGuard — Refactor Complete", JOptionPane.INFORMATION_MESSAGE);
+        }
 
         onComplete.accept(psiFile);
+
+        // NEW: fire a real, background compile check after the refactor,
+        // using the project's own configured JDK -- no setup needed.
+        boolean delegateCompiledBefore = (delegateValidation != ValidationOutcome.KEPT_INVALID);
+        RealCompilationChecker.compareBeforeAndAfter(project, targetFile, delegateCompiledBefore).thenAccept(verdict -> {
+            com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater(() -> {
+                switch (verdict) {
+                    case BOTH_COMPILED -> showDialog(
+                            "✅ Real compilation confirmed: the project compiled successfully after this refactor.",
+                            "CloneGuard — Compilation Verified", JOptionPane.INFORMATION_MESSAGE);
+                    case REFACTOR_BROKE_IT -> showDialog(
+                            "⚠️ This refactor's real compile FAILED -- the project no longer builds. Please review the change.",
+                            "CloneGuard — Compilation Check Failed", JOptionPane.WARNING_MESSAGE);
+                    case COULD_NOT_VERIFY -> { /* no JDK configured -- stay silent, not an error */ }
+                    case BROKEN_BEFORE_ALREADY -> { /* pre-existing issue, not this refactor's fault -- stay silent */ }
+                }
+            });
+        });
     }
 
     private static class DelegationPlan {
@@ -1910,6 +2099,10 @@ public class ExtractMethodEngine {
         int choice = Messages.showYesNoDialog(plan.confirmMessage, "CloneGuard — Confirm Refactor", Messages.getQuestionIcon());
         if (choice != Messages.YES) return;
 
+        // NEW (compilation validation feature): snapshot before writing.
+        Document pullUpDocumentForSnapshot = PsiDocumentManager.getInstance(project).getDocument(psiFile);
+        String pullUpBeforeSnapshot = (pullUpDocumentForSnapshot != null) ? pullUpDocumentForSnapshot.getText() : null;
+
         // Of the two duplicate copies, one (methodInClassA's content)
         // effectively just relocates into the superclass — it isn't
         // "eliminated," it moved. It's specifically methodInClassB's
@@ -1952,17 +2145,44 @@ public class ExtractMethodEngine {
             return;
         }
 
+        // NEW (compilation validation feature): check the result before
+        // trusting it.
+        ValidationOutcome pullUpValidation = validateAndMaybeRevert(psiFile, pullUpBeforeSnapshot);
+        if (pullUpValidation == ValidationOutcome.REVERTED) {
+            return;
+        }
+
         extractedPairs.put(pairKey, System.currentTimeMillis());
         com.cloneguard.services.MetricsTrackerService.getInstance(project).recordRefactor("pullUp", duplicatedLinesEliminated, cloneTypeLabel);
 
-        showDialog(
-                "✅ Pull Up Method applied!\n\n" +
-                canonical + "() moved into " + plan.superClass.getName() + ".\n" +
-                "Both " + canonical + "() and " + duplicate + "() are now inherited from there.\n\n" +
-                "Re-scanning the file now to refresh results...",
-                "CloneGuard — Refactor Complete", JOptionPane.INFORMATION_MESSAGE);
+        if (pullUpValidation != ValidationOutcome.KEPT_INVALID) {
+            showDialog(
+                    "✅ Pull Up Method applied!\n\n" +
+                    canonical + "() moved into " + plan.superClass.getName() + ".\n" +
+                    "Both " + canonical + "() and " + duplicate + "() are now inherited from there.\n\n" +
+                    "Re-scanning the file now to refresh results...",
+                    "CloneGuard — Refactor Complete", JOptionPane.INFORMATION_MESSAGE);
+        }
 
         onComplete.accept(psiFile);
+
+        // NEW: fire a real, background compile check after the refactor,
+        // using the project's own configured JDK -- no setup needed.
+        boolean pullUpCompiledBefore = (pullUpValidation != ValidationOutcome.KEPT_INVALID);
+        RealCompilationChecker.compareBeforeAndAfter(project, targetFile, pullUpCompiledBefore).thenAccept(verdict -> {
+            com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater(() -> {
+                switch (verdict) {
+                    case BOTH_COMPILED -> showDialog(
+                            "✅ Real compilation confirmed: the project compiled successfully after this refactor.",
+                            "CloneGuard — Compilation Verified", JOptionPane.INFORMATION_MESSAGE);
+                    case REFACTOR_BROKE_IT -> showDialog(
+                            "⚠️ This refactor's real compile FAILED -- the project no longer builds. Please review the change.",
+                            "CloneGuard — Compilation Check Failed", JOptionPane.WARNING_MESSAGE);
+                    case COULD_NOT_VERIFY -> { /* no JDK configured -- stay silent, not an error */ }
+                    case BROKEN_BEFORE_ALREADY -> { /* pre-existing issue, not this refactor's fault -- stay silent */ }
+                }
+            });
+        });
     }
 
     private static class PullUpPlan {
@@ -2258,6 +2478,10 @@ public class ExtractMethodEngine {
         int choice = Messages.showYesNoDialog(plan.confirmMessage, "CloneGuard — Confirm Refactor", Messages.getQuestionIcon());
         if (choice != Messages.YES) return;
 
+        // NEW (compilation validation feature): snapshot before writing.
+        Document pushDownDocumentForSnapshot = PsiDocumentManager.getInstance(project).getDocument(psiFile);
+        String pushDownBeforeSnapshot = (pushDownDocumentForSnapshot != null) ? pushDownDocumentForSnapshot.getText() : null;
+
         final boolean[] writeFailed = {false};
         final String[] writeFailureMessage = {null};
 
@@ -2290,6 +2514,13 @@ public class ExtractMethodEngine {
             return;
         }
 
+        // NEW (compilation validation feature): check the result before
+        // trusting it.
+        ValidationOutcome pushDownValidation = validateAndMaybeRevert(psiFile, pushDownBeforeSnapshot);
+        if (pushDownValidation == ValidationOutcome.REVERTED) {
+            return;
+        }
+
         extractedPairs.put(pairKey, System.currentTimeMillis());
         // Push Down isn't a duplication fix — there was only ever one
         // copy of the method — so 0 duplicated lines eliminated is the
@@ -2297,14 +2528,34 @@ public class ExtractMethodEngine {
         // breakdown on the dashboard.
         com.cloneguard.services.MetricsTrackerService.getInstance(project).recordRefactor("pushDown", 0);
 
-        showDialog(
-                "✅ Push Down Method applied!\n\n" +
-                methodName + "() moved out of " + plan.superClass.getName() + " into " + targetSubclassName + ".\n" +
-                "Other subclasses of " + plan.superClass.getName() + " no longer inherit it.\n\n" +
-                "Re-scanning the file now to refresh results...",
-                "CloneGuard — Refactor Complete", JOptionPane.INFORMATION_MESSAGE);
+        if (pushDownValidation != ValidationOutcome.KEPT_INVALID) {
+            showDialog(
+                    "✅ Push Down Method applied!\n\n" +
+                    methodName + "() moved out of " + plan.superClass.getName() + " into " + targetSubclassName + ".\n" +
+                    "Other subclasses of " + plan.superClass.getName() + " no longer inherit it.\n\n" +
+                    "Re-scanning the file now to refresh results...",
+                    "CloneGuard — Refactor Complete", JOptionPane.INFORMATION_MESSAGE);
+        }
 
         onComplete.accept(psiFile);
+
+        // NEW: fire a real, background compile check after the refactor,
+        // using the project's own configured JDK -- no setup needed.
+        boolean pushDownCompiledBefore = (pushDownValidation != ValidationOutcome.KEPT_INVALID);
+        RealCompilationChecker.compareBeforeAndAfter(project, targetFile, pushDownCompiledBefore).thenAccept(verdict -> {
+            com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater(() -> {
+                switch (verdict) {
+                    case BOTH_COMPILED -> showDialog(
+                            "✅ Real compilation confirmed: the project compiled successfully after this refactor.",
+                            "CloneGuard — Compilation Verified", JOptionPane.INFORMATION_MESSAGE);
+                    case REFACTOR_BROKE_IT -> showDialog(
+                            "⚠️ This refactor's real compile FAILED -- the project no longer builds. Please review the change.",
+                            "CloneGuard — Compilation Check Failed", JOptionPane.WARNING_MESSAGE);
+                    case COULD_NOT_VERIFY -> { /* no JDK configured -- stay silent, not an error */ }
+                    case BROKEN_BEFORE_ALREADY -> { /* pre-existing issue, not this refactor's fault -- stay silent */ }
+                }
+            });
+        });
     }
 
     private static class PushDownPlan {
