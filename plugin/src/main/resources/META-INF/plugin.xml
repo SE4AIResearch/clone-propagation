@@ -20,112 +20,44 @@
 
     <extensions defaultExtensionNs="com.intellij">
 
-        <!-- ═══════════════════════════════════════════════
-             SCENARIO 1: Ghost Text Listener
-             Intercepts JetBrains AI inline suggestions
-             ═══════════════════════════════════════════════ -->
         <editorFactoryListener
             implementation="com.cloneguard.listeners.InlineSuggestionListener"/>
 
-        <!-- ═══════════════════════════════════════════════
-             SCENARIO 1: Notification for unresolved pasted clones
-             Shows a persistent notification when the user chose
-             "Accept Anyway" or "Dismiss" on a detected paste-clone,
-             with a "Refactor with Extract Method" action button —
-             using the same engine Scenario 2's tool window button
-             uses. Replaces an earlier gutter-icon (LineMarkerProvider)
-             approach that, after extensive debugging, was found to
-             never be invoked by the platform in this environment
-             even in a minimal unconditional test — notifications are
-             a simpler, more reliable mechanism with no equivalent
-             extension-point fragility.
-             ═══════════════════════════════════════════════ -->
         <notificationGroup id="CloneGuard" displayType="STICKY_BALLOON" isLogByDefault="true"/>
 
-        <!-- ═══════════════════════════════════════════════
-             SCENARIO 2: Tool Window for Scan Results
-             Shows clone groups panel at bottom of IDE
-             ═══════════════════════════════════════════════ -->
         <toolWindow
             id="CloneGuard"
             anchor="bottom"
             factoryClass="com.cloneguard.ui.CloneGuardToolWindowFactory"
             icon="/icons/cloneguard.svg"/>
 
-        <!-- Application-level services -->
-        <!--
-            CloneGuardSettings: new (issue 4.2), persists the
-            configurable server URL, replacing the old hardcoded
-            constant in PythonServerClient.
-        -->
         <applicationService
             serviceImplementation="com.cloneguard.settings.CloneGuardSettings"/>
 
-        <!--
-            FIX (professor-flagged, 2.3): CloneIndexService was
-            registered here as an applicationService, but the class
-            itself was changed to @Service(Service.Level.PROJECT) to fix
-            the cross-project data leak the professor identified (a
-            paste in Project A could match a function from Project B,
-            since the index was shared IDE-wide). This XML registration
-            must match that annotation: left as applicationService,
-            the registration and the actual service level disagree,
-            which either breaks plugin startup or silently reintroduces
-            the exact bug 2.3 was meant to fix. Moved to projectService
-            below, alongside the plugin's other project-scoped services.
-        -->
-
-        <!-- Settings/Preferences panel: new (issue 4.2) -->
         <applicationConfigurable
             parentId="tools"
             instance="com.cloneguard.settings.CloneGuardConfigurable"
             id="com.cloneguard.settings.CloneGuardConfigurable"
             displayName="CloneGuard"/>
 
-        <!-- Project-level services -->
         <projectService
             serviceImplementation="com.cloneguard.services.FileScannerService"/>
 
         <projectService
             serviceImplementation="com.cloneguard.services.PythonServerClient"/>
 
-        <!-- Moved from applicationService above: see FIX note (issue 2.3) -->
         <projectService
             serviceImplementation="com.cloneguard.services.CloneIndexService"/>
 
-        <!--
-            FIX (found live, Trend Dashboard testing): MetricsTrackerService
-            was never registered here at all when the Trend Dashboard
-            feature was built — every other project-level service in this
-            file (FileScannerService, PythonServerClient, CloneIndexService)
-            has an explicit projectService entry, but this one was missed.
-            Same category of bug as the CloneIndexService fix noted above:
-            the class's own @Service(Service.Level.PROJECT) annotation and
-            its XML registration have to agree, or the service doesn't
-            reliably resolve. Confirmed live: refactors succeeded normally
-            (that code path never touches this service), but every
-            recordRefactor()/startSession() call downstream of
-            MetricsTrackerService.getInstance(project) silently did
-            nothing, and the Trend Dashboard stayed permanently empty
-            regardless of how many refactors or scans were run.
-        -->
         <projectService
             serviceImplementation="com.cloneguard.services.MetricsTrackerService"/>
 
-        <!-- NEW (Scenario 3 dashboard support): imports GitHub PR-sourced
-             refactor sessions into the Trend Dashboard once per project
-             open — see CloneGuardStartupActivity's own javadoc for why
-             this runs at startup rather than on every dashboard refresh. -->
         <postStartupActivity
             implementation="com.cloneguard.startup.CloneGuardStartupActivity"/>
 
     </extensions>
 
     <actions>
-        <!-- ═══════════════════════════════════════════════
-             SCENARIO 2: Scan Current File action
-             Under Tools → CloneGuard → Scan Current File
-             ═══════════════════════════════════════════════ -->
         <group id="CloneGuardMenu" text="CloneGuard" description="CloneGuard actions">
             <add-to-group group-id="ToolsMenu" anchor="last"/>
 
@@ -136,9 +68,6 @@
                 <keyboard-shortcut keymap="$default" first-keystroke="shift ctrl G"/>
             </action>
 
-            <!-- NEW: project-wide scan support, professor-requested —
-                 scans every Java file in the project together, rather
-                 than requiring "Scan Current File" once per file. -->
             <action id="CloneGuard.ScanProject"
                     class="com.cloneguard.ui.ScanProjectAction"
                     text="Scan Entire Project"
@@ -150,6 +79,11 @@
                     class="com.cloneguard.ui.IndexFileAction"
                     text="Index Current File"
                     description="Index functions in the current file for clone detection"/>
+
+            <action id="CloneGuard.TestRealCompilation"
+                    class="com.cloneguard.ui.TestRealCompilationAction"
+                    text="Test: Real Compilation Check (throwaway)"
+                    description="Isolated test of real-compile-based validation, not part of the real refactor flow"/>
         </group>
     </actions>
 
