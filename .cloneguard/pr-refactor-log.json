@@ -12,5 +12,19 @@
     "pullUpCount": 0,
     "pushDownCount": 0,
     "understandAvailable": false
+  },
+  {
+    "timestamp": 1790987216174,
+    "fileName": "DemoUtils.java",
+    "source": "github_pr",
+    "pullRequestNumber": 30,
+    "locBefore": 26,
+    "locAfter": 24,
+    "duplicatedLinesEliminated": 2,
+    "extractCount": 1,
+    "delegateCount": 0,
+    "pullUpCount": 0,
+    "pushDownCount": 0,
+    "understandAvailable": false
   }
 ]
