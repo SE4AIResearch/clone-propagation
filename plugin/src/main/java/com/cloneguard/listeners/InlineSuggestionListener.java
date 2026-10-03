@@ -422,7 +422,30 @@ public class InlineSuggestionListener implements EditorFactoryListener {
                 // unconditional test implementation. Notifications are a
                 // simpler, more robust platform mechanism with no equivalent
                 // extension-point fragility.
-                showRefactorNotification(editor, duplicateMethodName, finalResult);
+                //
+                // FIX (found live, this session -- single-method-file paste
+                // test): this used to call showRefactorNotification()
+                // unconditionally here, reachable whenever EITHER
+                // result.isClone OR result.isAiGenerated was true (see the
+                // early-return gate above this whole block). A pasted
+                // method can be flagged AI-generated with NO real clone
+                // match at all -- e.g. the very first method pasted into an
+                // otherwise-empty file. In that case CloneResult.noClone()
+                // (or an equivalent isClone=false result) correctly leaves
+                // matchedFunction as "" and similarity as 0, but this
+                // notification was shown anyway, producing a nonsensical
+                // "findMax() looks like a Clone of () (0% similarity)"
+                // message -- confirmed directly via screenshot, whose
+                // "Refactor" button then correctly failed with "could not
+                // find one or both methods," since there was never a real
+                // duplicate to refactor against. Only show this
+                // notification when there's an ACTUAL clone match to act
+                // on; an AI-generated-but-not-a-clone paste already got its
+                // own, separate, correct notification earlier in this same
+                // flow and needs nothing further here.
+                if (finalResult.isClone) {
+                    showRefactorNotification(editor, duplicateMethodName, finalResult);
+                }
             }
 
             // NOTE: Push Down checking used to run right here, piggybacked
