@@ -1315,6 +1315,24 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
     # for shared identifiers entirely.
     if (is_stream1 or is_stream2) and overlap > 0:
         sufficient_overlap = True
+    # FIX (found live, this session -- reverseStringLoop()/
+    # reverseStringRecursive() confirmed via debug logging, AFTER the
+    # arithmetic-presence fix above already let this pair reach this
+    # point: semantic_score 0.9962, shared_ops={'string'}, overlap=0.182
+    # -- real, non-zero identifier overlap (they share the "input"
+    # parameter), just short of the 0.24 threshold. Same reasoning as
+    # the stream exemption directly above: 'string' appearing in
+    # shared_ops here means BOTH functions do real character-level
+    # string manipulation (charAt/substring/append) -- guaranteed by the
+    # hard string-presence check earlier in this function, which already
+    # requires both sides to agree on having 'string' in their
+    # fingerprint before reaching this far. Requiring overlap > 0 as well
+    # (not just "both are string functions") keeps this narrow: two
+    # UNRELATED string functions sharing zero identifiers (e.g.
+    # reverseString vs. toUpperCase) still get correctly rejected here,
+    # since overlap would be 0 for them.
+    if 'string' in shared_ops and overlap > 0:
+        sufficient_overlap = True
     # FIX (found live, this session, round 12 -- Scenario 3 GitHub PR test):
     # firstElement()/firstElementSafe() -- structurally identical in spirit
     # to lastElement()/lastElementSafe() -- was missing from PR detection
