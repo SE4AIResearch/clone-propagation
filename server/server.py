@@ -1157,7 +1157,27 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
         # Allow exception: bitwise-only functions vs arithmetic with mod
         # (e.g. n % 2 == 0  vs  n & 1 == 0) — both check evenness via a
         # single comparison, so let identifier/structural score decide.
-        if not (('bitwise' in fp1 or 'bitwise' in fp2) and ('%' in fp1 or '%' in fp2)):
+        #
+        # FIX (found live, this session -- reverseStringLoop()/
+        # reverseStringRecursive() confirmed false negative via debug
+        # logging: "Arithmetic presence mismatch: {'>','string','-'} vs
+        # {'string'}"): a string-manipulation pair can legitimately differ
+        # in whether INDEX arithmetic is explicit. reverseStringLoop()
+        # computes input.length() - 1 directly; reverseStringRecursive()
+        # achieves the identical effect implicitly, through
+        # substring()/charAt() recursion, with no arithmetic operator in
+        # its own text at all. Penalizing this as an "arithmetic presence
+        # mismatch" punishes exactly the kind of recursive-vs-iterative
+        # restructuring this whole function already tolerates elsewhere
+        # (see the recursion exemptions earlier in this function). Scoped
+        # narrowly to BOTH sides already being confirmed string functions
+        # (fp1/fp2 both contain 'string') -- this does NOT loosen the
+        # arithmetic-presence check for ordinary numeric functions at all,
+        # so it carries none of the false-positive risk the ubiquitous-
+        # operator-overlap gate further below is deliberately guarding
+        # against.
+        both_string_functions = ('string' in fp1) and ('string' in fp2)
+        if not both_string_functions and not (('bitwise' in fp1 or 'bitwise' in fp2) and ('%' in fp1 or '%' in fp2)):
             logger.debug(f"Arithmetic presence mismatch: {fp1} vs {fp2} — skipping")
             return False, False
 
@@ -2638,16 +2658,6 @@ def scan_file():
                 continue
 
             semantic_score = float(np.dot(fn_i["embedding"], fn_j["embedding"]))
-            # TEMPORARY DEBUG (investigating Type 4 under-detection,
-            # confirmed live: fibonacciRecursive/fibonacciIterative,
-            # factorialIterative/factorialRecursive, and
-            # reverseStringLoop/reverseStringRecursive all went
-            # completely undetected in a controlled 6-pair test file.
-            # This logs EVERY Layer 2 candidate pair's raw semantic
-            # score, including ones about to be filtered out by the
-            # 0.90 threshold immediately below, so the real numbers can
-            # be read from the server logs instead of guessed at.
-            # Remove once the threshold question is resolved.
             logger.info(f"/scan DEBUG semantic_score {fn_i['name']} <-> {fn_j['name']}: {semantic_score:.4f}")
             if semantic_score < 0.90:
                 continue
