@@ -2638,6 +2638,17 @@ def scan_file():
                 continue
 
             semantic_score = float(np.dot(fn_i["embedding"], fn_j["embedding"]))
+            # TEMPORARY DEBUG (investigating Type 4 under-detection,
+            # confirmed live: fibonacciRecursive/fibonacciIterative,
+            # factorialIterative/factorialRecursive, and
+            # reverseStringLoop/reverseStringRecursive all went
+            # completely undetected in a controlled 6-pair test file.
+            # This logs EVERY Layer 2 candidate pair's raw semantic
+            # score, including ones about to be filtered out by the
+            # 0.90 threshold immediately below, so the real numbers can
+            # be read from the server logs instead of guessed at.
+            # Remove once the threshold question is resolved.
+            logger.info(f"/scan DEBUG semantic_score {fn_i['name']} <-> {fn_j['name']}: {semantic_score:.4f}")
             if semantic_score < 0.90:
                 continue
 
