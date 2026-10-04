@@ -804,6 +804,35 @@ def operator_fingerprint_shared(code):
     # the short snippets analyzed here.
     code_no_strings = re.sub(r'"[^"]*"', '""', code)
 
+    # FIX (found live, this session -- LargeSnippetTest.java, a
+    # realistic-scale file testing all four clone types among unrelated
+    # "noise" methods): minOf()/minOfSafe() -- a real, genuine Type 3
+    # near-miss pair -- went undetected. Confirmed via debug logging:
+    # minOf()'s fingerprint showed {'/', '-', '<'}, but minOf()'s actual
+    # body ("int min = arr[0]; for (...) { if (arr[i] < min) min =
+    # arr[i]; } return min;") contains neither '/' nor '-' anywhere --
+    # proving comment text was being scanned alongside the real code.
+    # The section-header comment sitting directly above the method in
+    # the source file ("// TYPE 3 PAIR #2 — Near-Miss Clone (guard
+    # clause added)") contains both a '/' (the comment marker itself)
+    # and a '-' (the hyphen in "Near-Miss"), exactly matching the
+    # phantom operators found.
+    #
+    # The exact mechanism by which comment text reaches this function
+    # wasn't conclusively pinned down client-side -- the same symptom
+    # appeared via two different extraction paths tonight (Scenario 1's
+    # paste indexing, and now Scenario 2's full-file scan), which is
+    # itself a reason not to trust a single client-side fix to cover
+    # every path. Fixed defensively here instead, at the one place all
+    # paths funnel through before fingerprinting: operator detection
+    # should never be influenced by comment content, full stop,
+    # regardless of what the client happens to send. Comments are
+    # stripped AFTER string-literal stripping (not before), so a string
+    # literal containing "//" (e.g. a URL like "http://example.com")
+    # isn't itself mistaken for the start of a line comment.
+    code_no_strings = re.sub(r'//.*', '', code_no_strings)
+    code_no_strings = re.sub(r'/\*.*?\*/', '', code_no_strings, flags=re.DOTALL)
+
     # FIX: strip lambda arrows ('->') before any operator detection runs.
     # Tokenized as '-' followed by '>', a lambda like "v -> v > 0" has a
     # real identifier ('v') immediately before the '-', which is exactly
