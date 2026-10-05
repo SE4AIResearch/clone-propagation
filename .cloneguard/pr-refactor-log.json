@@ -40,5 +40,19 @@
     "pullUpCount": 0,
     "pushDownCount": 0,
     "understandAvailable": false
+  },
+  {
+    "timestamp": 1791236666768,
+    "fileName": "Scenario3_Retest_Small.java",
+    "source": "github_pr",
+    "pullRequestNumber": 32,
+    "locBefore": 57,
+    "locAfter": 61,
+    "duplicatedLinesEliminated": 0,
+    "extractCount": 1,
+    "delegateCount": 0,
+    "pullUpCount": 0,
+    "pushDownCount": 0,
+    "understandAvailable": false
   }
 ]

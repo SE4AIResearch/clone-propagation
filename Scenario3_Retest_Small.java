@@ -32,13 +32,17 @@ private static int coreTallyOdd(Object v, int[] arr) {
 
     // TYPE 3 — Near-Miss Clone
     public int last(int[] arr) {
-        return arr[arr.length - 1];
-    }
+    return coreLastSafe(arr);
+}
 
     public int lastSafe(int[] arr) {
-        if (arr == null || arr.length == 0) return -1;
-        return arr[arr.length - 1];
-    }
+    if (arr == null || arr.length == 0) return -1;
+    return coreLastSafe(arr);
+}
+
+private static int coreLastSafe(int[] arr) {
+    return arr[arr.length - 1];
+}
 
     // TYPE 4 — Semantic Clone
     // NOTE: hits the known, documented limitation — expected to NOT
