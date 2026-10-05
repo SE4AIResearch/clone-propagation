@@ -26,5 +26,19 @@
     "pullUpCount": 0,
     "pushDownCount": 0,
     "understandAvailable": false
+  },
+  {
+    "timestamp": 1791234957130,
+    "fileName": "Sceanrio3_Small.java",
+    "source": "github_pr",
+    "pullRequestNumber": 31,
+    "locBefore": 53,
+    "locAfter": 57,
+    "duplicatedLinesEliminated": 0,
+    "extractCount": 2,
+    "delegateCount": 0,
+    "pullUpCount": 0,
+    "pushDownCount": 0,
+    "understandAvailable": false
   }
 ]
