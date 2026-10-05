@@ -1164,12 +1164,25 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
     # feature of a legitimate Type 4 semantic clone (e.g. factorial's
     # single loop vs factorialRecursive's zero loops) and must not be
     # rejected here.
+    # TEMPORARY DEBUG (investigating reverse()/joinLoop() false positive --
+    # 5.26% structural similarity accepted as Type 4, with no loop-depth
+    # rejection logged despite neither side being recursive on paper.
+    # Logging actual computed rec1/rec2/stream/depth values to see what
+    # this gate is really doing, rather than guessing from code review
+    # alone. Remove once this is resolved.
+    logger.info(f"/scan DEBUG gate-trace rec1={rec1} rec2={rec2} "
+                 f"is_stream1={is_stream1} is_stream2={is_stream2} "
+                 f"fn1_name={fn1_name} fn2_name={fn2_name}")
     if not rec1 and not rec2 and not is_stream1 and not is_stream2:
         depth1 = loop_nesting_depth(code1)
         depth2 = loop_nesting_depth(code2)
+        logger.info(f"/scan DEBUG gate-trace depth1={depth1} depth2={depth2}")
         if depth1 != depth2:
             logger.debug(f"Loop nesting depth mismatch: {depth1} vs {depth2} — skipping")
             return False, False
+    else:
+        logger.info(f"/scan DEBUG gate-trace loop-depth check SKIPPED "
+                     f"(rec1={rec1} rec2={rec2} is_stream1={is_stream1} is_stream2={is_stream2})")
 
         # (c) Fixed-literal loop bound vs data-dependent loop bound.
         # sumArray() (bound = arr.length) and doubleValue() (bound = the
