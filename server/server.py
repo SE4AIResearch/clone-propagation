@@ -960,16 +960,38 @@ def has_data_dependent_loop_bound(code):
 
 def is_recursive_shared(code, function_name):
     """Best-effort check for self-recursion: does the function BODY call
-    itself by name. Must check the body only, not the full code — a
-    function's signature always contains its own name (e.g. 'public int
-    square(int n)'), so checking the full code falsely flags every
-    function as recursive."""
+    itself by name, as a BARE call. Must check the body only, not the
+    full code — a function's signature always contains its own name
+    (e.g. 'public int square(int n)'), so checking the full code falsely
+    flags every function as recursive.
+
+    FIX (found live, this session -- reverse()/joinLoop() false positive,
+    confirmed via targeted gate-trace debug logging: reverse() computed
+    rec1=True despite containing no recursion at all). reverse()'s body
+    is "new StringBuilder(s).reverse().toString()" -- it calls
+    StringBuilder's OWN .reverse() method, a completely unrelated JDK
+    method that merely happens to share the same text as this function's
+    own name. The old bare regex matched ".reverse(" as if it were a
+    self-call, incorrectly marking reverse() as recursive, which then
+    exempted the pair from the loop-nesting-depth check (by design, for
+    GENUINE recursion-vs-loop Type 4 pairs) -- letting two completely
+    unrelated functions (string reversal vs. array joining) through as a
+    96% "semantic clone" with just 5.26% structural similarity. Same
+    root-cause pattern as the has_other_method_call() fix above: a
+    dot-prefixed call on some OTHER object/class must never be read as
+    "this function calling itself," regardless of whether the method
+    name happens to coincide."""
     if not function_name:
         return False
     code = code.strip()
     idx = code.find('{')
     body = code[idx:] if idx != -1 else code
-    return bool(re.search(r'\b' + re.escape(function_name) + r'\s*\(', body))
+    for m in re.finditer(r'\b' + re.escape(function_name) + r'\s*\(', body):
+        before = body[:m.start()].rstrip()
+        if before.endswith('.'):
+            continue  # instance/static call on some OTHER object/class
+        return True
+    return False
 
 
 def if_condition_relational_ops(code):
@@ -1164,25 +1186,12 @@ def operations_compatible_shared(code1, code2, name1=None, name2=None):
     # feature of a legitimate Type 4 semantic clone (e.g. factorial's
     # single loop vs factorialRecursive's zero loops) and must not be
     # rejected here.
-    # TEMPORARY DEBUG (investigating reverse()/joinLoop() false positive --
-    # 5.26% structural similarity accepted as Type 4, with no loop-depth
-    # rejection logged despite neither side being recursive on paper.
-    # Logging actual computed rec1/rec2/stream/depth values to see what
-    # this gate is really doing, rather than guessing from code review
-    # alone. Remove once this is resolved.
-    logger.info(f"/scan DEBUG gate-trace rec1={rec1} rec2={rec2} "
-                 f"is_stream1={is_stream1} is_stream2={is_stream2} "
-                 f"fn1_name={fn1_name} fn2_name={fn2_name}")
     if not rec1 and not rec2 and not is_stream1 and not is_stream2:
         depth1 = loop_nesting_depth(code1)
         depth2 = loop_nesting_depth(code2)
-        logger.info(f"/scan DEBUG gate-trace depth1={depth1} depth2={depth2}")
         if depth1 != depth2:
             logger.debug(f"Loop nesting depth mismatch: {depth1} vs {depth2} — skipping")
             return False, False
-    else:
-        logger.info(f"/scan DEBUG gate-trace loop-depth check SKIPPED "
-                     f"(rec1={rec1} rec2={rec2} is_stream1={is_stream1} is_stream2={is_stream2})")
 
         # (c) Fixed-literal loop bound vs data-dependent loop bound.
         # sumArray() (bound = arr.length) and doubleValue() (bound = the
