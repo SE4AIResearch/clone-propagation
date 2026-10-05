@@ -2,29 +2,33 @@ public class Scenario3_Small {
 
     // TYPE 1 — Exact Clone
     public int sum(int[] arr) {
-        int t = 0;
-        for (int v : arr) t += v;
-        return t;
-    }
+    return coreTotal(v, arr);
+}
 
     public int total(int[] arr) {
-        int t = 0;
-        for (int v : arr) t += v;
-        return t;
-    }
+    return coreTotal(v, arr);
+}
+
+private static int coreTotal(Object v, int[] arr) {
+    int t = 0;
+    for (int v : arr) t += v;
+    return t;
+}
 
     // TYPE 2 — Renamed Clone
     public int countNeg(int[] arr) {
-        int c = 0;
-        for (int v : arr) if (v < 0) c++;
-        return c;
-    }
+    return coreTallyNeg(v, arr);
+}
 
     public int tallyNeg(int[] nums) {
-        int n = 0;
-        for (int x : nums) if (x < 0) n++;
-        return n;
-    }
+    return coreTallyNeg(x, nums);
+}
+
+private static int coreTallyNeg(Object v, int[] arr) {
+    int c = 0;
+    for (int v : arr) if (v < 0) c++;
+    return c;
+}
 
     // TYPE 3 — Near-Miss Clone
     public int first(int[] arr) {
