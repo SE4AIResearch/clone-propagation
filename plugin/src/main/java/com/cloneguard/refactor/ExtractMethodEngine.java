@@ -1616,27 +1616,80 @@ public class ExtractMethodEngine {
                     delegationTarget = reverseSibling;
                     viaSibling = true;
                 } else {
-                    if (canonicalParams.length != duplicateParams.length) {
+                    boolean returnTypesMatch = canonicalReturn != null && canonicalReturn.equals(duplicateReturn);
+
+                    // FIX (found live, this session -- joinLoop()/
+                    // joinRecursive() false refusal): a parameter-count
+                    // mismatch doesn't always mean "cannot safely
+                    // delegate." When the SHORTER signature's parameters
+                    // are an exact, in-order, same-type PREFIX of the
+                    // LONGER signature's parameters -- e.g. joinLoop
+                    // (String[] parts) and joinRecursive(String[] parts,
+                    // int index) -- the method with MORE parameters can
+                    // safely call the one with FEWER by simply not
+                    // passing its own trailing extra argument(s). This
+                    // requires inventing NO value at all: every argument
+                    // passed is one the rewritten method already has
+                    // sitting in its own parameter list. Deliberately
+                    // narrower than guessing a default for a MISSING
+                    // parameter (which would require fabricating a value
+                    // with no guarantee it's correct) -- this only ever
+                    // omits parameters the delegation target never
+                    // needed in the first place.
+                    //
+                    // prefixMatchHandled tracks whether one of the two
+                    // branches below already fully handled this pair, so
+                    // the ORIGINAL equal-length type-checking loop and
+                    // final "return types differ" abort just below (both
+                    // written assuming canonicalParams.length ==
+                    // duplicateParams.length) are skipped entirely for a
+                    // mismatched-length pair -- running that loop
+                    // unmodified against a genuinely mismatched length
+                    // would index past the shorter array and throw.
+                    boolean prefixMatchHandled = false;
+
+                    if (returnTypesMatch && duplicateParams.length > canonicalParams.length
+                            && paramsArePrefixMatch(canonicalParams, duplicateParams)) {
+                        // duplicate has extra trailing params canonical
+                        // doesn't need -- defaults already set up for
+                        // exactly this: methodToRewrite=duplicateMethod,
+                        // delegationTarget=canonicalMethod. Nothing to
+                        // reassign; just proceed past the mismatch.
+                        prefixMatchHandled = true;
+                    } else if (returnTypesMatch && canonicalParams.length > duplicateParams.length
+                            && paramsArePrefixMatch(duplicateParams, canonicalParams)) {
+                        // canonical has extra trailing params duplicate
+                        // doesn't need -- swap roles: rewrite CANONICAL
+                        // to call duplicate instead, leaving duplicate
+                        // untouched as the delegation target.
+                        methodToRewrite = canonicalMethod;
+                        methodLeftAlone = duplicateMethod;
+                        delegationTarget = duplicateMethod;
+                        prefixMatchHandled = true;
+                    } else if (canonicalParams.length != duplicateParams.length) {
                         return DelegationPlan.abort("CloneGuard — Cannot Delegate Safely",
                                 canonical + "() and " + duplicate + "() take a different number of parameters — " +
                                 "delegation needs a matching signature, and no existing method in this class " +
                                 "already wraps either one with a compatible signature. No changes were made.",
                                 JOptionPane.WARNING_MESSAGE);
                     }
-                    for (int i = 0; i < canonicalParams.length; i++) {
-                        if (!canonicalParams[i].getType().equals(duplicateParams[i].getType())) {
-                            return DelegationPlan.abort("CloneGuard — Cannot Delegate Safely",
-                                    "Parameter " + (i + 1) + " type differs between " + canonical + "() and " + duplicate +
-                                    "() — delegation needs a matching signature, and no existing method in this class " +
-                                    "already wraps either one with a compatible signature. No changes were made.",
-                                    JOptionPane.WARNING_MESSAGE);
+
+                    if (!prefixMatchHandled) {
+                        for (int i = 0; i < canonicalParams.length; i++) {
+                            if (!canonicalParams[i].getType().equals(duplicateParams[i].getType())) {
+                                return DelegationPlan.abort("CloneGuard — Cannot Delegate Safely",
+                                        "Parameter " + (i + 1) + " type differs between " + canonical + "() and " + duplicate +
+                                        "() — delegation needs a matching signature, and no existing method in this class " +
+                                        "already wraps either one with a compatible signature. No changes were made.",
+                                        JOptionPane.WARNING_MESSAGE);
+                            }
                         }
+                        return DelegationPlan.abort("CloneGuard — Cannot Delegate Safely",
+                                "Return types differ between " + canonical + "() and " + duplicate + "() — " +
+                                "delegation needs a matching signature, and no existing method in this class " +
+                                "already wraps either one with a compatible signature. No changes were made.",
+                                JOptionPane.WARNING_MESSAGE);
                     }
-                    return DelegationPlan.abort("CloneGuard — Cannot Delegate Safely",
-                            "Return types differ between " + canonical + "() and " + duplicate + "() — " +
-                            "delegation needs a matching signature, and no existing method in this class " +
-                            "already wraps either one with a compatible signature. No changes were made.",
-                            JOptionPane.WARNING_MESSAGE);
                 }
             }
         }
@@ -1646,7 +1699,17 @@ public class ExtractMethodEngine {
         PsiParameter[] rewriteParams = methodToRewrite.getParameterList().getParameters();
         String targetName = delegationTarget.getName();
         PsiType targetReturn = delegationTarget.getReturnType();
+        // FIX (found live, this session -- joinLoop()/joinRecursive()
+        // prefix-match delegation): rewriteParams can now legitimately
+        // have MORE entries than delegationTarget actually accepts (see
+        // paramsArePrefixMatch() below) -- in every OTHER case (direct
+        // match, sibling wrapper), rewriteParams.length already exactly
+        // equals the target's own parameter count, so this .limit() is a
+        // complete no-op there and changes nothing about existing
+        // behavior. Only the new prefix-match case actually needs it.
+        int targetParamCount = delegationTarget.getParameterList().getParameters().length;
         String callArgsText = Arrays.stream(rewriteParams)
+                .limit(targetParamCount)
                 .map(PsiParameter::getName).reduce((a, b) -> a + ", " + b).orElse("");
         boolean isVoid = targetReturn != null && "void".equals(targetReturn.getPresentableText());
         String callLine = isVoid
@@ -1692,6 +1755,24 @@ public class ExtractMethodEngine {
             if (!paramsA[i].getType().equals(paramsB[i].getType())) return false;
         }
         return returnA != null && returnB != null && returnA.equals(returnB);
+    }
+
+    /**
+     * True if `shorter`'s parameters are an exact, in-order, same-type
+     * prefix of `longer`'s parameters -- e.g. (String[] parts) is a
+     * prefix of (String[] parts, int index). Used by buildDelegationPlan()
+     * to allow delegation across a parameter-count mismatch WITHOUT
+     * inventing any value: the method with more parameters can simply
+     * omit its own trailing extra argument(s) when calling the one with
+     * fewer, since every argument passed is already sitting in its own
+     * parameter list.
+     */
+    private boolean paramsArePrefixMatch(PsiParameter[] shorter, PsiParameter[] longer) {
+        if (shorter.length > longer.length) return false;
+        for (int i = 0; i < shorter.length; i++) {
+            if (!shorter[i].getType().equals(longer[i].getType())) return false;
+        }
+        return true;
     }
 
     /**
