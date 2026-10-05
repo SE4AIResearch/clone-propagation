@@ -794,6 +794,35 @@ def identifier_overlap_shared(code1, code2):
     return len(set1 & set2) / max(1, len(set1 | set2))
 
 
+def _strip_dead_assignments(code_no_strings):
+    """Remove simple local-variable declarations whose variable is never
+    referenced again anywhere else in the method -- provably dead code
+    (declared, assigned, never read again), a safe mechanical fact rather
+    than a guess, not full compiler-grade liveness analysis.
+
+    FIX (found live, this session -- findMax()/getLargest() false negative):
+    getLargest() contains "int difference = current - largest;" -- computed
+    and then never used anywhere. That dead line's '-' was being counted as
+    real evidence this function "does subtraction," producing a false
+    "Arithmetic presence mismatch" against findMax(), which has no
+    subtraction anywhere in its real, live logic. Only matches simple
+    'TYPE NAME = EXPR;' declarations (the common case); anything more
+    complex (multi-variable declarations, declarations without
+    initializers) is left untouched rather than risk misparsing it."""
+    pattern = re.compile(r'\b(?:int|long|short|byte|double|float|boolean|char|String|var)\s+(\w+)\s*=\s*[^;]+;')
+    changed = True
+    while changed:
+        changed = False
+        for m in pattern.finditer(code_no_strings):
+            name = m.group(1)
+            occurrences = len(re.findall(r'\b' + re.escape(name) + r'\b', code_no_strings))
+            if occurrences == 1:
+                code_no_strings = code_no_strings[:m.start()] + code_no_strings[m.end():]
+                changed = True
+                break
+    return code_no_strings
+
+
 def operator_fingerprint_shared(code):
     """Which arithmetic/comparison/string/bitwise operators appear in code."""
     ops = set()
@@ -833,6 +862,10 @@ def operator_fingerprint_shared(code):
     code_no_strings = re.sub(r'//.*', '', code_no_strings)
     code_no_strings = re.sub(r'/\*.*?\*/', '', code_no_strings, flags=re.DOTALL)
 
+    # Strip provably-dead local declarations before any operator scanning
+    # runs at all -- see _strip_dead_assignments() docstring above.
+    code_no_strings = _strip_dead_assignments(code_no_strings)
+
     # FIX: strip lambda arrows ('->') before any operator detection runs.
     # Tokenized as '-' followed by '>', a lambda like "v -> v > 0" has a
     # real identifier ('v') immediately before the '-', which is exactly
@@ -860,7 +893,22 @@ def operator_fingerprint_shared(code):
     # String-returning function's concatenation-via-'+' isn't counted as
     # "doing arithmetic" the way a numeric accumulator's '+' is.
     is_string_return = (get_return_type_shared(code) == 'String')
-    plus_detected = ('+=' in code_no_strings) or bool(re.search(r'\w[\]\)]?\s*\+\s*\w', code_no_strings))
+
+    # FIX (found live, this session -- calculateSum()/calculateTotal() and
+    # countWords()/analyze() false negatives): modern stream-style Java
+    # often does addition through a method reference or collector instead
+    # of a literal '+' -- e.g. "Arrays.stream(values).reduce(0,
+    # Integer::sum)" or "Collectors.summingInt(x -> 1)" -- which the plain
+    # '+' token search can never see, even though both are unambiguous
+    # addition by definition in the JDK's own standard library, not a
+    # guess. Recognized narrowly, by name, rather than attempting to
+    # understand stream/functional code in general.
+    functional_sum_detected = bool(re.search(r'Integer::sum|Long::sum|Double::sum', code_no_strings)) \
+        or bool(re.search(r'Collectors\.summing(Int|Long|Double)\s*\(', code_no_strings))
+
+    plus_detected = (('+=' in code_no_strings)
+                      or bool(re.search(r'\w[\]\)]?\s*\+\s*\w', code_no_strings))
+                      or functional_sum_detected)
     if plus_detected:
         if is_string_return:
             ops.add('string')
