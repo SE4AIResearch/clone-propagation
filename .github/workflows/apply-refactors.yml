@@ -317,8 +317,14 @@ jobs:
 
           if not applied:
               body = "**CloneGuard** — none of the selected clones could be applied:\n\n"
+              # FIX: same GitHub auto-link collision as the other two
+              # "#{idx}" occurrences in this file -- see the detailed
+              # fix note further below, by the main applied/skipped
+              # comment body. This is the "nothing could be applied at
+              # all" edge-case path specifically, easy to miss since it
+              # only fires when every selected item gets skipped.
               for idx, a, b, reason in skipped:
-                  body += f"- ⏭️ #{idx} `{a}()` ↔ `{b}()`: {reason}\n"
+                  body += f"- ⏭️ Item {idx} `{a}()` ↔ `{b}()`: {reason}\n"
               gh_request(f"https://api.github.com/repos/{REPO}/issues/{PR_NUMBER}/comments",
                          method="POST", body={"body": body})
               print("Nothing applied.")
@@ -354,20 +360,47 @@ jobs:
           subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
           subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
           subprocess.run(["git", "add", "-A"], check=True)
-          applied_ids = ", ".join(f"#{idx}" for idx, *_ in applied)
+          # FIX (found live, this session -- Scenario 3 retest, confirmed
+          # via direct evidence): a bare "#3"-style token in ANY text
+          # that GitHub renders as markdown -- a commit message, a PR
+          # comment, anything -- gets automatically turned into a link
+          # to the issue/PR with that NUMBER in this repo, regardless of
+          # what the author actually meant by it. This script was only
+          # ever using "#idx" as a plain checklist-item label (1, 2, 3...),
+          # never intending a link at all -- but once this repo had real
+          # PRs numbered #1, #2, #3 from earlier work, GitHub silently
+          # rewrote every one of these plain labels into links pointing
+          # at those old, completely unrelated PRs, with their real
+          # titles shown in place of the intended plain number. Using
+          # "Item {idx}" instead of "#{idx}" everywhere below removes the
+          # collision entirely -- GitHub has no special handling for the
+          # word "Item", so this is permanently safe regardless of how
+          # many PRs or issues this repo accumulates over time.
+          applied_ids = ", ".join(f"Item {idx}" for idx, *_ in applied)
           subprocess.run(["git", "commit", "-m", f"Apply selected refactors ({applied_ids}) via /refactor"], check=True)
           subprocess.run(["git", "push"], check=True)
 
           body = f"**CloneGuard** — applied {len(applied)} refactor(s):\n\n"
           for idx, a, b, tech, note in applied:
               label = "Method Delegation" if tech == "delegation" else "Extract Method"
-              body += f"- ✅ #{idx} `{a}()` ↔ `{b}()` ({label})\n"
+              # FIX (found live, this session -- Scenario 3 retest, confirmed
+              # via direct evidence): see the matching fix note above this
+              # section, by the git commit line. "#{idx}" here was ALSO
+              # being auto-linked by GitHub to unrelated real PRs in this
+              # repo (confirmed directly: a checklist item labeled "#1"
+              # rendered as a live link to an old PR titled "Fix clone
+              # detection false positives and delegation safety checks",
+              # with that unrelated title shown instead of the intended
+              # plain item number). Same fix, same reasoning: "Item {idx}"
+              # instead of "#{idx}" everywhere a checklist item number is
+              # shown in PR-comment markdown.
+              body += f"- ✅ Item {idx} `{a}()` ↔ `{b}()` ({label})\n"
               if note:
                   body += f"  - ℹ️ {note}\n"
           if skipped:
               body += "\nSkipped:\n"
               for idx, a, b, reason in skipped:
-                  body += f"- ⏭️ #{idx} `{a}()` ↔ `{b}()`: {reason}\n"
+                  body += f"- ⏭️ Item {idx} `{a}()` ↔ `{b}()`: {reason}\n"
           body += "\nA fresh scan will run automatically on this push -- check back for an updated checklist."
 
           # NEW (Scenario 3 dashboard, no-IDE version): a real dashboard
