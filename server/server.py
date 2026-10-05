@@ -845,8 +845,27 @@ def operator_fingerprint_shared(code):
 
     # '+' as addition: catches "x += y", "x = a + b", AND "return a + b(...)"
     # or any standalone "a + b" expression — not just assignment-style.
-    if '+=' in code_no_strings or re.search(r'\w[\]\)]?\s*\+\s*\w', code_no_strings):
-        ops.add('+')
+    #
+    # FIX (found live, this session -- joinLoop()/joinRecursive() false
+    # negative, confirmed via debug logging: "Arithmetic presence
+    # mismatch: {'<'} vs {'>', '+'}"): joinRecursive()'s "parts[index] +
+    # joinRecursive(...)" is pure String concatenation (parts is
+    # String[], the recursive call returns String) -- there is no way to
+    # tell this apart from numeric "a + b" by looking at the '+' token
+    # alone. But Java's own type rules make this unambiguous: '+' on a
+    # String-typed value is ALWAYS concatenation, never arithmetic. When
+    # this function's own return type is String -- a hard fact, not a
+    # guess -- any '+' it contains is classified as string-category
+    # evidence instead of arithmetic-category evidence, so a
+    # String-returning function's concatenation-via-'+' isn't counted as
+    # "doing arithmetic" the way a numeric accumulator's '+' is.
+    is_string_return = (get_return_type_shared(code) == 'String')
+    plus_detected = ('+=' in code_no_strings) or bool(re.search(r'\w[\]\)]?\s*\+\s*\w', code_no_strings))
+    if plus_detected:
+        if is_string_return:
+            ops.add('string')
+        else:
+            ops.add('+')
 
     # '-' as BINARY subtraction only. FIX: the old pattern
     # r'\w[\]\)]?\s*-\s*\w' also matched unary negation — e.g. "return -1;"
@@ -896,7 +915,14 @@ def operator_fingerprint_shared(code):
         ops.add('==')
     if '!=' in code_no_strings:
         ops.add('!=')
-    if 'charAt' in code or 'substring' in code or '+ "' in code or '" +' in code:
+    # FIX (found live, this session -- joinLoop() false negative): the
+    # 'string' trigger list only recognized charAt/substring and literal
+    # string concatenation ('+ "'), missing the equally common
+    # StringBuilder idiom (.append(...).toString()) that joinLoop() uses
+    # -- it never triggered 'string' at all under the old list, despite
+    # being a textbook string-building function.
+    if ('charAt' in code or 'substring' in code or '+ "' in code or '" +' in code
+            or '.append(' in code or '.toString(' in code):
         ops.add('string')
 
     # Bitwise: single & or | (not && or ||, which are logical operators).
