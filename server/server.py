@@ -995,14 +995,32 @@ def if_condition_relational_ops(code):
 
 
 def has_other_method_call(code, own_name):
-    """True if the body calls some OTHER method -- a plain identifier
-    immediately followed by '(', that isn't a Java control-flow keyword
-    (if/for/while/switch/catch/synchronized/return) and isn't the
-    function's own name (a self-call is recursion, tracked separately by
-    is_recursive_shared() above -- calling yourself isn't "delegating to
-    something else"). Same text/regex approach as the rest of this
-    file's call-detection helpers (see _resolved_calls_own_name further
-    down)."""
+    """True if the body calls some OTHER method DEFINED IN THIS FILE --
+    a BARE identifier immediately followed by '(', that isn't a Java
+    control-flow keyword (if/for/while/switch/catch/synchronized/return)
+    and isn't the function's own name (a self-call is recursion, tracked
+    separately by is_recursive_shared() above -- calling yourself isn't
+    "delegating to something else").
+
+    FIX (found live, this session -- joinLoop()/joinRecursive() false
+    negative via /check, confirmed through debug logging): previously
+    ANY identifier-paren pattern counted, including ordinary JDK library
+    calls like "new StringBuilder(", "result.append(", "input.charAt(" --
+    completely normal Java idiom present in countless real functions,
+    unrelated to whether two functions delegate to each other. A loop
+    implementation using StringBuilder naturally racks up several such
+    calls; a recursive implementation using only array/string indexing
+    may have none at all -- producing a "method-call presence mismatch"
+    between two functions that are a textbook valid Type 4 pair, purely
+    because one happened to use more JDK methods than the other. Now
+    only counts a BARE call (no preceding '.' and no preceding 'new'
+    keyword) as evidence of delegation to a sibling method -- instance/
+    static method calls on an object or class (x.foo(), ClassName.foo())
+    and constructor calls (new Foo()) are excluded, since neither
+    indicates delegation to another method in this file the way a plain
+    helperMethod(x) call does. Same text/regex approach as the rest of
+    this file's call-detection helpers (see _resolved_calls_own_name
+    further down)."""
     control_keywords = {'if', 'for', 'while', 'switch', 'catch', 'synchronized', 'return'}
     idx = code.find('{')
     body = code[idx:] if idx != -1 else code
@@ -1012,6 +1030,11 @@ def has_other_method_call(code, own_name):
             continue
         if own_name and name == own_name:
             continue
+        before = body[:m.start()].rstrip()
+        if before.endswith('.'):
+            continue  # instance/static method call (x.foo(), Class.foo())
+        if re.search(r'\bnew$', before):
+            continue  # constructor call (new Foo())
         return True
     return False
 
