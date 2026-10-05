@@ -2339,9 +2339,26 @@ def generate_extract_suggestion(name_a, code_a, name_b, code_b, all_functions=No
 
         stmts_a = _split_top_level_statements(inner_a)
         stmts_b = _split_top_level_statements(inner_b)
-        if len(stmts_a) < 2 or len(stmts_b) < 2:
-            return {"available": False, "reason": "Method body too short to extract."}
-
+        # FIX (found live, this session -- Scenario 3 PR retest,
+        # last()/lastSafe()): this blanket "fewer than 2 statements ->
+        # refuse immediately" check used to run BEFORE real block-
+        # matching, blocking last() (whose entire body is the single
+        # statement "return arr[arr.length - 1];") before the actual
+        # shared-block logic a few lines below ever got a chance to run.
+        # This early check is logically redundant with that later logic
+        # anyway -- the matcher can never produce a match longer than
+        # the shorter method's own statement count, so if either side
+        # has fewer than 2 statements, the real block[2] < 2 check
+        # further below already catches it identically. Removed here so
+        # single-statement methods reach real block-matching, where the
+        # narrow, already-proven-safe "is this one statement a bare,
+        # unconditional return" distinction (see the fix note at that
+        # check) can correctly tell last()/lastSafe() (safe to extract)
+        # apart from a guard-clause case like isPrimeIterative()/
+        # isPrimeHelper() (genuinely unsafe to extract alone, confirmed
+        # by the ORIGINAL finding this whole area of the code is built
+        # around) -- rather than this earlier, cruder check treating
+        # both shapes identically.
         block = _find_longest_common_contiguous_block(stmts_a, stmts_b)
 
         # NOTE (this session, Scenario 3 PR test): single-statement
@@ -2359,7 +2376,38 @@ def generate_extract_suggestion(name_a, code_a, name_b, code_b, all_functions=No
         # correctness risks one level deeper, requiring block length >= 2
         # unconditionally prioritizes never-silently-corrupt over maximum
         # detection coverage.
-        if block is None or block[2] < 2:
+        # FIX (found live, this session -- Scenario 3 PR retest,
+        # last()/lastSafe()): a matched block of length exactly 1 is
+        # safe to extract directly (not fall through to delegation)
+        # specifically when that one statement is a BARE, unconditional
+        # return -- e.g. "return arr[arr.length - 1];" -- never a guard
+        # clause like "if (n < 2) return 0;", which is exactly the shape
+        # that was found genuinely unsafe to extract alone (confirmed via
+        # isPrimeIterative()/isPrimeHelper() testing, see the detailed
+        # note on block_ends_in_return a little further below in this
+        # same function): extracted by itself with no trailing fallback
+        # return, a guard clause produces a real "missing return on some
+        # path" compile error. A plain, complete return statement has no
+        # such risk -- extracted alone, it's a fully valid, always-
+        # returning method body, and reusing block_ends_in_return's own
+        # "^return\\b" pattern here (not a new, separately-invented
+        # check) keeps this consistent with what the rest of this
+        # function already trusts as the definition of "this block ends
+        # in a real return".
+        #
+        # Scoped deliberately narrow: ONLY block[2] == 1, and ONLY when
+        # that single statement matches this pattern. Every other
+        # shape this check used to cover -- block is None, a length-1
+        # block that ISN'T a bare return (a guard clause, a bare
+        # assignment, anything else), length-1 blocks on EITHER side
+        # that didn't even match -- all fall through to the exact same
+        # delegation-or-refuse logic as before, completely unchanged.
+        single_safe_return = False
+        if block is not None and block[2] == 1:
+            only_stmt = stmts_a[block[0]].strip()
+            single_safe_return = bool(re.match(r'^return\b', only_stmt))
+
+        if block is None or (block[2] < 2 and not single_safe_return):
             # No literal shared fragment -- Extract Method has nothing to
             # work with by definition (this is the Type 4 case). Try
             # delegation instead before giving up entirely.
