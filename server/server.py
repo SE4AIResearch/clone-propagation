@@ -2432,24 +2432,45 @@ def generate_extract_suggestion(name_a, code_a, name_b, code_b, all_functions=No
             # cases like isPrimeIterative()/isPrimeHelper() through (they
             # share the rare '%' operator), while blocking identifier-only
             # coincidences from ever reaching an auto-applied rewrite.
-            fp_a = operator_fingerprint_shared(code_a)
-            fp_b = operator_fingerprint_shared(code_b)
-            shared_fp = fp_a & fp_b
-            RARE_OPS_LOCAL = {'/', '%'}
-            UBIQUITOUS_OPS_LOCAL = {'+', '-', '*', '<', '>', '=='}
-            meaningful_shared_fp = shared_fp - UBIQUITOUS_OPS_LOCAL
-            has_operator_evidence = (
-                len(shared_fp & RARE_OPS_LOCAL) >= 1 or len(meaningful_shared_fp) >= 2
-            )
-            if not has_operator_evidence:
+            # FIX (found live, this session -- Scenario 3 PR retest,
+            # joinLoop()/joinRecursive()): this used to run its OWN
+            # separate, simplified copy of the operator-evidence check
+            # (RARE_OPS_LOCAL/UBIQUITOUS_OPS_LOCAL, duplicated here
+            # instead of calling operations_compatible_shared() itself)
+            # rather than reusing the real one. Confirmed live: /scan
+            # correctly detects joinLoop()/joinRecursive() as a genuine
+            # Type 4 clone (operations_compatible_shared() was fixed
+            # earlier this same session to recognize both sides as
+            # string-manipulation functions sharing real evidence), but
+            # this separate duplicate copy -- never updated with that
+            # same fix -- then refused to AUTHORIZE actually applying
+            # the delegation, purely because the two checks had silently
+            # drifted out of sync the moment one of them was fixed and
+            # the other wasn't.
+            #
+            # Calling operations_compatible_shared() directly here
+            # instead closes that gap for good: there is now exactly
+            # ONE place in this file that decides "is there real
+            # evidence connecting these two functions," used
+            # identically by detection (/scan, /check) and by this
+            # refactor-authorization step -- a future fix to one can
+            # never again silently leave the other behind. This is also
+            # a real, honest behavior change beyond just the confirmed
+            # bug: operations_compatible_shared() performs several
+            # additional checks the old duplicate never did (branching
+            # shape, loop-nesting depth, arithmetic-family matching),
+            # so this authorization step is now AT LEAST as strict as
+            # detection itself, never less -- the correct direction for
+            # a check that gates an auto-applied code change.
+            compatible, _low_confidence = operations_compatible_shared(code_a, code_b, name_a, name_b)
+            if not compatible:
                 return {
                     "available": False,
-                    "reason": "No shared code fragment found, and the only supporting "
-                              "evidence for a possible relationship is generic identifier "
-                              "overlap (e.g. common loop/accumulator variable names) with "
-                              "no shared distinctive operators — too weak to safely "
-                              "auto-apply a delegation. This pair should be reviewed "
-                              "manually rather than auto-refactored."
+                    "reason": "No shared code fragment found, and there isn't enough "
+                              "real evidence (matching return type, shared operators, "
+                              "or shared identifiers) connecting these two functions to "
+                              "safely auto-apply a delegation. This pair should be "
+                              "reviewed manually rather than auto-refactored."
                 }
             delegation = generate_delegation_suggestion(name_a, code_a, name_b, code_b, all_functions)
             if delegation.get("available"):
