@@ -6,65 +6,67 @@ public class Scenario3_Retest_Medium2 {
 
     // TYPE 1
     public int sumArray(int[] arr) {
-        int total = 0;
-        for (int i = 0; i < arr.length; i++) {
-            total += arr[i];
-        }
-        return total;
-    }
+    return coreAddAllElements(arr);
+}
 
     public boolean isPositive(int n) {
         return n > 0;
     }
 
     public int addAllElements(int[] arr) {
-        int total = 0;
-        for (int i = 0; i < arr.length; i++) {
+    return coreAddAllElements(arr);
+}
+
+private static int coreAddAllElements(int[] arr) {
+    int total = 0;
+    for (int i = 0; i < arr.length; i++) {
             total += arr[i];
         }
-        return total;
-    }
+    return total;
+}
 
     // TYPE 2
     public int countPositive(int[] values) {
-        int count = 0;
-        for (int i = 0; i < values.length; i++) {
-            if (values[i] > 0) {
-                count++;
-            }
-        }
-        return count;
-    }
+    return coreTallyPositiveNumbers(values);
+}
 
     public String reverse(String s) {
         return new StringBuilder(s).reverse().toString();
     }
 
     public int tallyPositiveNumbers(int[] nums) {
-        int tally = 0;
-        for (int j = 0; j < nums.length; j++) {
-            if (nums[j] > 0) {
-                tally++;
+    return coreTallyPositiveNumbers(nums);
+}
+
+private static int coreTallyPositiveNumbers(int[] values) {
+    int count = 0;
+    for (int i = 0; i < values.length; i++) {
+            if (values[i] > 0) {
+                count++;
             }
         }
-        return tally;
-    }
+    return count;
+}
 
     // TYPE 3
     public int first(int[] arr) {
-        return arr[0];
-    }
+    return coreFirstSafe(arr);
+}
 
     public double square(double x) {
         return x * x;
     }
 
     public int firstSafe(int[] arr) {
-        if (arr == null || arr.length == 0) {
+    if (arr == null || arr.length == 0) {
             return -1;
         }
-        return arr[0];
-    }
+    return coreFirstSafe(arr);
+}
+
+private static int coreFirstSafe(int[] arr) {
+    return arr[0];
+}
 
     public boolean isEven(int n) {
         return n % 2 == 0;
@@ -87,9 +89,6 @@ public class Scenario3_Retest_Medium2 {
     }
 
     public String joinRecursive(String[] parts, int index) {
-        if (index >= parts.length) {
-            return "";
-        }
-        return parts[index] + joinRecursive(parts, index + 1);
-    }
+    return joinLoop(parts);
+}
 }

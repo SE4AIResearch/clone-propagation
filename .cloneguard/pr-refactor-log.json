@@ -26,5 +26,19 @@
     "pullUpCount": 0,
     "pushDownCount": 0,
     "understandAvailable": false
+  },
+  {
+    "timestamp": 1791257047667,
+    "fileName": "Scenario3_Retest_Medium2.java",
+    "source": "github_pr",
+    "pullRequestNumber": 34,
+    "locBefore": 95,
+    "locAfter": 94,
+    "duplicatedLinesEliminated": 1,
+    "extractCount": 3,
+    "delegateCount": 1,
+    "pullUpCount": 0,
+    "pushDownCount": 0,
+    "understandAvailable": false
   }
 ]
