@@ -20,6 +20,11 @@ import secrets
 # individual safety check, similarity score, and pairwise comparison --
 # logs at DEBUG, so it's available when actively debugging (set
 # CLONEGUARD_LOG_LEVEL=DEBUG) but silent by default in production.
+# Redeploy marker: joinLoop()/joinRecursive() prefix-match delegation
+# fix + operations_compatible_shared() authorization-gate fix, both
+# already confirmed via hand-trace before this push. Purely a comment
+# -- no behavior change -- added only to force a fresh commit after a
+# manually-cancelled Render deploy.
 logging.basicConfig(
     level=os.environ.get("CLONEGUARD_LOG_LEVEL", "INFO"),
     format="[CloneGuard] %(message)s",
