@@ -2206,6 +2206,22 @@ def find_compatible_wrapper(name_a, name_b, all_functions, params_b, return_b):
     return None, None
 
 
+def _params_are_prefix_match(shorter, longer):
+    """True if `shorter`'s parameter types are an exact, in-order prefix
+    of `longer`'s -- e.g. [String[] parts] is a prefix of [String[] parts,
+    int index]. Direct Python port of ExtractMethodEngine.java's
+    paramsArePrefixMatch(), same reasoning: lets generate_delegation_
+    suggestion() allow delegation across a parameter-count mismatch
+    WITHOUT inventing any value -- the method with more parameters can
+    simply omit its own trailing extra argument(s) when calling the one
+    with fewer, since every argument passed is already sitting in its
+    own parameter list."""
+    if len(shorter) > len(longer):
+        return False
+    return all(_normalize_type(shorter[i]["type"]) == _normalize_type(longer[i]["type"])
+               for i in range(len(shorter)))
+
+
 def generate_delegation_suggestion(name_a, code_a, name_b, code_b, all_functions=None):
     """
     Method Delegation: for clones with NO literal shared code (Type 4 --
@@ -2271,6 +2287,35 @@ def generate_delegation_suggestion(name_a, code_a, name_b, code_b, all_functions
                     via_sibling = True
                     rewrite_name, rewrite_sig, rewrite_params = name_a, sig_a, params_a
                     alone_name = name_b
+                elif (_normalize_type(return_a) == _normalize_type(return_b)
+                      and len(params_b) > len(params_a)
+                      and _params_are_prefix_match(params_a, params_b)):
+                    # FIX (found live, this session -- ported from
+                    # ExtractMethodEngine.java's identical fix, same
+                    # reasoning: joinLoop()/joinRecursive() confirmed via
+                    # direct Scenario 3 PR testing): name_b has extra
+                    # trailing parameters name_a doesn't need -- e.g.
+                    # joinLoop(String[] parts) and joinRecursive(
+                    # String[] parts, int index). The method with MORE
+                    # parameters can safely call the one with FEWER by
+                    # simply not passing its own trailing extra
+                    # argument(s) -- no value is invented, every argument
+                    # passed is already sitting in the rewritten method's
+                    # own parameter list. Defaults already set up for
+                    # exactly this (delegate_to=name_a, rewrite_name/sig/
+                    # params=name_b's own) -- nothing to reassign here,
+                    # just proceed past the mismatch instead of aborting.
+                    pass
+                elif (_normalize_type(return_a) == _normalize_type(return_b)
+                      and len(params_a) > len(params_b)
+                      and _params_are_prefix_match(params_b, params_a)):
+                    # Mirror case: name_a has the extra trailing
+                    # parameter(s) -- swap roles, rewriting name_a to
+                    # call name_b instead, leaving name_b (the shorter,
+                    # target signature) completely untouched.
+                    delegate_to = name_b
+                    rewrite_name, rewrite_sig, rewrite_params = name_a, sig_a, params_a
+                    alone_name = name_b
                 elif len(params_a) != len(params_b):
                     return {
                         "available": False,
@@ -2295,7 +2340,22 @@ def generate_delegation_suggestion(name_a, code_a, name_b, code_b, all_functions
                                   f"in this file already wraps either one with a compatible signature."
                     }
 
-        call_args = ", ".join(p["name"] for p in rewrite_params)
+        # FIX (found live, this session -- ported from
+        # ExtractMethodEngine.java's identical .limit() fix):
+        # rewrite_params can now legitimately have MORE entries than
+        # delegate_to actually accepts (see the prefix-match branches
+        # above) -- in every OTHER case (direct match, sibling wrapper),
+        # len(rewrite_params) already exactly equals delegate_to's own
+        # parameter count, so this slice is a complete no-op there and
+        # changes nothing about existing behavior. Only the new
+        # prefix-match case actually needs it. delegate_to is always
+        # either name_a or name_b here (never a sibling-wrapper name, by
+        # construction of the branches above), so its own parameter
+        # count is always directly available as len(params_a) or
+        # len(params_b).
+        target_param_count = len(params_a) if delegate_to == name_a else (
+            len(params_b) if delegate_to == name_b else len(rewrite_params))
+        call_args = ", ".join(p["name"] for p in rewrite_params[:target_param_count])
         if _normalize_type(_extract_return_type(rewrite_sig)) == "void":
             new_duplicate_body = f"{rewrite_sig} {{\n    {delegate_to}({call_args});\n}}"
         else:
