@@ -2,39 +2,38 @@ public class DifficultCloneTest {
 
     // TYPE 1 — Exact clone
     public int totalA(int[] data) {
-        int result = 0;
-        for (int i = 0; i < data.length; i++) {
-            result += data[i];
-        }
-        return result;
-    }
+    return coreTotalB(data);
+}
 
     public int totalB(int[] data) {
-        int result = 0;
-        for (int i = 0; i < data.length; i++) {
+    return coreTotalB(data);
+}
+
+private static int coreTotalB(int[] data) {
+    int result = 0;
+    for (int i = 0; i < data.length; i++) {
             result += data[i];
         }
-        return result;
-    }
+    return result;
+}
 
     // TYPE 2 — Renamed variables + different parameter names
     public int positiveA(int[] values) {
-        int count = 0;
-        for (int value : values) {
+    return corePositiveB(value, values);
+}
+
+    public int positiveB(int[] numbers) {
+    return corePositiveB(number, numbers);
+}
+
+private static int corePositiveB(Object value, int[] values) {
+    int count = 0;
+    for (int value : values) {
             if (value > 0)
                 count++;
         }
-        return count;
-    }
-
-    public int positiveB(int[] numbers) {
-        int amount = 0;
-        for (int number : numbers) {
-            if (number > 0)
-                amount++;
-        }
-        return amount;
-    }
+    return count;
+}
 
     // TYPE 3 — Similar structure, but statements modified
     public int findMinA(int[] data) {
@@ -78,13 +77,8 @@ public class DifficultCloneTest {
 
     // TYPE 4 — Same behavior, completely different structure
     public int countA(int[] values) {
-        int count = 0;
-        for (int value : values) {
-            if (value % 2 == 0)
-                count++;
-        }
-        return count;
-    }
+    return countB(values);
+}
 
     public int countB(int[] values) {
         if (values.length == 0)
@@ -110,14 +104,6 @@ public class DifficultCloneTest {
     }
 
     public int productB(int[] values) {
-        int result = 1;
-        int index = 0;
-
-        while (index < values.length) {
-            result = result * values[index];
-            index++;
-        }
-
-        return result;
-    }
+    return productA(values);
+}
 }
